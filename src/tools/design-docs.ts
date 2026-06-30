@@ -774,6 +774,7 @@ async function downloadDesignResource(
 
   const response = await httpClient.get(normalizedSourceUrl, {
     timeout: REQUEST_CONFIG.TIMEOUT,
+    redirect: 'manual',
     headers: {
       Accept: '*/*',
     },
@@ -910,6 +911,7 @@ async function fetchImageContent(url: string): Promise<ImageContent | null> {
 
   const response = await httpClient.get(url, {
     timeout: REQUEST_CONFIG.TIMEOUT,
+    redirect: 'manual',
     headers: {
       Accept: 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
     },

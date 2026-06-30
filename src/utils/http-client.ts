@@ -33,6 +33,8 @@ interface RequestOptions {
   retries?: number;
   /** Delay between retries in milliseconds */
   retryDelay?: number;
+  /** Redirect handling mode for fetch */
+  redirect?: RequestRedirect;
   /** Additional headers to include in the request */
   headers?: Record<string, string>;
 }
@@ -141,6 +143,7 @@ class HttpClient {
       timeout = REQUEST_CONFIG.TIMEOUT,
       retries = REQUEST_CONFIG.MAX_RETRIES,
       retryDelay = REQUEST_CONFIG.RETRY_DELAY,
+      redirect,
       headers = {},
     } = options;
 
@@ -156,6 +159,7 @@ class HttpClient {
       return this.fetchWithRetry(url, {
         method: 'GET',
         headers: requestHeaders,
+        redirect,
         signal: AbortSignal.timeout(timeout),
       }, retries, retryDelay);
     });

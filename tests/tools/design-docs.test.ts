@@ -444,6 +444,10 @@ describe('Apple Design downloads and resources', () => {
     await expect(handleDownloadAppleDesignResource({
       url: 'https://developer.apple.com/design/downloads/templates.zip',
     })).rejects.toThrow('outside the Apple Design allowlist');
+    expect(httpClient.get).toHaveBeenCalledWith(
+      'https://developer.apple.com/design/downloads/templates.zip',
+      expect.objectContaining({ redirect: 'manual' }),
+    );
   });
 
   it('should reject oversized downloads before reading the body', async () => {
@@ -578,6 +582,10 @@ describe('Apple Design examples', () => {
       url: 'https://developer.apple.com/design/images/example.png',
       limit: 1,
     })).rejects.toThrow('outside the Apple Design allowlist');
+    expect(httpClient.get).toHaveBeenCalledWith(
+      'https://developer.apple.com/design/images/example.png',
+      expect.objectContaining({ redirect: 'manual' }),
+    );
   });
 
   it('should reject oversized direct image examples before reading the body', async () => {
