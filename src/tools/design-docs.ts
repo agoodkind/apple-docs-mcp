@@ -1423,14 +1423,26 @@ function renderInlineContent(
 }
 
 function getSupportedPlatforms(documentRecord: Record<string, unknown>): string[] {
-  const customMetadata = asRecord(documentRecord.customMetadata);
+  const customMetadata = getDesignCustomMetadata(documentRecord);
   const supportedPlatforms = customMetadata?.['supported-platforms'] ?? customMetadata?.supportedPlatforms;
   return getStringArray(supportedPlatforms);
 }
 
 function getCustomMetadataString(documentRecord: Record<string, unknown>, key: string): string | undefined {
-  const customMetadata = asRecord(documentRecord.customMetadata);
+  const customMetadata = getDesignCustomMetadata(documentRecord);
   return getString(customMetadata, key);
+}
+
+function getDesignCustomMetadata(
+  documentRecord: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+  const rootCustomMetadata = asRecord(documentRecord.customMetadata);
+  if (rootCustomMetadata) {
+    return rootCustomMetadata;
+  }
+
+  const metadata = asRecord(documentRecord.metadata);
+  return asRecord(metadata?.customMetadata);
 }
 
 function resolveImageBlockUrl(

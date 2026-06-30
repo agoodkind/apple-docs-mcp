@@ -32,6 +32,15 @@ const SAMPLE_HIG_DOCUMENT = {
         text: 'Place content in ways that help people understand your interface.',
       },
     ],
+    customMetadata: {
+      'supported-platforms': [
+        'iOS',
+        'iPadOS',
+        'macOS',
+      ],
+      'alert-text': 'Use layout guidance with platform conventions.',
+      'alert-date': '2026-06-09',
+    },
   },
   abstract: [
     {
@@ -39,13 +48,6 @@ const SAMPLE_HIG_DOCUMENT = {
       text: 'Arrange views so people can understand and interact with them.',
     },
   ],
-  customMetadata: {
-    'supported-platforms': [
-      'iOS',
-      'iPadOS',
-      'macOS',
-    ],
-  },
   references: {
     'doc://image/layout-hero': {
       type: 'image',
@@ -278,6 +280,8 @@ describe('Apple Design document formatting', () => {
     expect(result).toContain('Arrange views so people can understand and interact with them.');
     expect(result).toContain('## Supported Platforms');
     expect(result).toContain('iOS');
+    expect(result).toContain('## Alert');
+    expect(result).toContain('Use layout guidance with platform conventions.');
     expect(result).toContain('**consistent** grid.');
     expect(result).toContain('![A layout example](https://developer.apple.com/assets/elements/icons/layout-hero.png)');
     expect(result).toContain('| Platform | Spacing |');
