@@ -866,7 +866,11 @@ async function collectImageCandidates(args: GetAppleDesignExamplesArgs): Promise
       await getDesignResourcesCatalog();
     }
     const resource = resourceCatalogById.get(args.resourceId);
-    if (resource?.previewImageUrl) {
+    if (!resource) {
+      throw new Error(`Unknown Apple Design resourceId: ${args.resourceId}`);
+    }
+
+    if (resource.previewImageUrl) {
       candidates.push({
         url: resource.previewImageUrl,
         alt: resource.title,

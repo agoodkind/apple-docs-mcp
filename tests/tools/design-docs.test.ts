@@ -634,6 +634,16 @@ describe('Apple Design examples', () => {
     expect(httpClient.get).not.toHaveBeenCalled();
   });
 
+  it('should reject unknown resource IDs for examples', async () => {
+    (httpClient.getText as jest.Mock).mockResolvedValue('<html><body></body></html>');
+
+    await expect(handleGetAppleDesignExamples({
+      resourceId: 'missing-resource-id',
+    })).rejects.toThrow('Unknown Apple Design resourceId');
+
+    expect(httpClient.get).not.toHaveBeenCalled();
+  });
+
   it('should return HIG image references as MCP image content blocks', async () => {
     const imageBytes = Buffer.from('hig-image');
     (httpClient.getJson as jest.Mock).mockResolvedValue(SAMPLE_HIG_DOCUMENT);
