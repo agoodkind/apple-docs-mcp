@@ -746,6 +746,30 @@ describe('Apple Design downloads and resources', () => {
     expect(firstLink?.uri).toBe(secondLink?.uri);
   });
 
+  it('should reuse in-flight duplicate downloads for the same URL', async () => {
+    const archiveBytes = Buffer.from('zip-bytes');
+    let resolveResponse: (response: Response) => void = () => undefined;
+    const responsePromise = new Promise<Response>((resolve) => {
+      resolveResponse = resolve;
+    });
+    (httpClient.get as jest.Mock).mockReturnValue(responsePromise);
+
+    const firstPromise = handleDownloadAppleDesignResource({
+      url: 'https://developer.apple.com/design/downloads/templates.zip',
+    });
+    const secondPromise = handleDownloadAppleDesignResource({
+      url: 'https://developer.apple.com/design/downloads/templates.zip',
+    });
+
+    resolveResponse(createResponse(archiveBytes, 'application/zip'));
+    const [firstResult, secondResult] = await Promise.all([firstPromise, secondPromise]);
+    const firstLink = firstResult.content.find(content => content.type === 'resource_link');
+    const secondLink = secondResult.content.find(content => content.type === 'resource_link');
+
+    expect(httpClient.get).toHaveBeenCalledTimes(1);
+    expect(firstLink?.uri).toBe(secondLink?.uri);
+  });
+
   it('should enforce smaller maxBytes limits on duplicate cache hits', async () => {
     const archiveBytes = Buffer.from('zip-bytes');
     (httpClient.get as jest.Mock).mockResolvedValue(

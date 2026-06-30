@@ -87,6 +87,11 @@ interface DesignImageCandidate {
   strict?: boolean;
 }
 
+interface InFlightDesignDownload {
+  byteLimit: number;
+  promise: Promise<CachedDesignResource>;
+}
+
 type AppleDesignUrlValidator = (url: string, description: string) => void;
 
 export interface SearchAppleDesignDocsArgs {
@@ -119,6 +124,7 @@ export interface GetAppleDesignExamplesArgs {
 
 const cachedResourcesByUri = new Map<string, CachedDesignResource>();
 const cachedResourcesBySourceUrl = new Map<string, CachedDesignResource>();
+const inFlightDownloadsBySourceUrl = new Map<string, InFlightDesignDownload>();
 const resourceCatalogById = new Map<string, DesignResourceCatalogEntry>();
 let defaultDesignCacheDirectory: string | undefined;
 let designCacheWriteQueue: Promise<void> = Promise.resolve();
@@ -489,6 +495,7 @@ export function clearDesignResourceCacheForTesting(): void {
   designResourcesCache.clear();
   cachedResourcesByUri.clear();
   cachedResourcesBySourceUrl.clear();
+  inFlightDownloadsBySourceUrl.clear();
   resourceCatalogById.clear();
   designCacheWriteQueue = Promise.resolve();
 }
@@ -811,6 +818,35 @@ async function downloadDesignResource(
     return cachedResource;
   }
 
+  const inFlightDownload = inFlightDownloadsBySourceUrl.get(normalizedSourceUrl);
+  if (inFlightDownload && inFlightDownload.byteLimit >= byteLimit) {
+    const downloadedResource = await inFlightDownload.promise;
+    if (downloadedResource.size > byteLimit) {
+      throw new Error(`Apple Design resource exceeds the ${byteLimit} byte download limit.`);
+    }
+    return downloadedResource;
+  }
+
+  const downloadPromise = downloadDesignResourceToCache(resource, byteLimit, normalizedSourceUrl);
+  inFlightDownloadsBySourceUrl.set(normalizedSourceUrl, {
+    byteLimit,
+    promise: downloadPromise,
+  });
+
+  try {
+    return await downloadPromise;
+  } finally {
+    if (inFlightDownloadsBySourceUrl.get(normalizedSourceUrl)?.promise === downloadPromise) {
+      inFlightDownloadsBySourceUrl.delete(normalizedSourceUrl);
+    }
+  }
+}
+
+async function downloadDesignResourceToCache(
+  resource: DesignResourceCatalogEntry,
+  byteLimit: number,
+  normalizedSourceUrl: string,
+): Promise<CachedDesignResource> {
   const {
     response,
     finalUrl,
