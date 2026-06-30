@@ -102,7 +102,7 @@ export function isValidAppleDeveloperUrl(url: string): boolean {
 export function isAppleDesignUrl(url: string): boolean {
   try {
     const urlObj = new URL(url);
-    return urlObj.hostname === 'developer.apple.com' && urlObj.pathname.startsWith('/design/');
+    return urlObj.hostname === 'developer.apple.com' && (urlObj.pathname === '/design' || urlObj.pathname.startsWith('/design/'));
   } catch {
     return false;
   }
