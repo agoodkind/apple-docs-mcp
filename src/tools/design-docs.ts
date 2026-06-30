@@ -82,6 +82,7 @@ interface DesignSearchResult {
 interface DesignImageCandidate {
   url: string;
   alt?: string;
+  strict?: boolean;
 }
 
 type AppleDesignUrlValidator = (url: string, description: string) => void;
@@ -404,7 +405,16 @@ export async function handleGetAppleDesignExamples(
       break;
     }
 
-    const imageContent = await fetchImageContent(candidate.url);
+    let imageContent: ImageContent | null;
+    try {
+      imageContent = await fetchImageContent(candidate.url);
+    } catch (error) {
+      if (candidate.strict) {
+        throw error;
+      }
+      continue;
+    }
+
     if (imageContent) {
       imageContentBlocks.push(imageContent);
     }
@@ -918,7 +928,7 @@ async function collectImageCandidates(args: GetAppleDesignExamplesArgs): Promise
     const url = args.url;
     validateAppleDesignExampleUrl(url);
     if (isDirectAppleImageCandidateUrl(url)) {
-      candidates.push({ url });
+      candidates.push({ url, strict: true });
     } else {
       const jsonUrl = convertToDesignJsonApiUrl(url);
       if (jsonUrl) {
