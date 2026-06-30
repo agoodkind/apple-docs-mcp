@@ -9,7 +9,8 @@ import type {
 } from '@modelcontextprotocol/sdk/types.js';
 import * as cheerio from 'cheerio';
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import type { Dirent } from 'node:fs';
+import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { designContentCache, designResourcesCache } from '../utils/cache.js';
@@ -24,7 +25,9 @@ const APPLE_DESIGN_DOWNLOAD_HOSTS = new Set([
   'itunespartner.apple.com',
 ]);
 const DEFAULT_DOWNLOAD_MAX_BYTES = 50 * 1024 * 1024;
+const DEFAULT_DOWNLOAD_CACHE_MAX_BYTES = 1024 * 1024 * 1024;
 const DEFAULT_PREVIEW_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
+const MAX_APPLE_DESIGN_REDIRECTS = 5;
 const DIRECT_RESOURCE_EXTENSIONS = new Set([
   '.dmg',
   '.fig',
@@ -772,14 +775,14 @@ async function downloadDesignResource(
     return cachedResource;
   }
 
-  const response = await httpClient.get(normalizedSourceUrl, {
-    timeout: REQUEST_CONFIG.TIMEOUT,
-    redirect: 'manual',
+  const {
+    response,
+    finalUrl,
+  } = await fetchAppleDesignAssetResponse(normalizedSourceUrl, 'Apple Design resource', {
     headers: {
       Accept: '*/*',
     },
   });
-  validateAppleDesignFinalResponseUrl(response, 'Apple Design resource');
 
   const data = await readLimitedResponseBytes(
     response,
@@ -787,13 +790,14 @@ async function downloadDesignResource(
     'Apple Design resource',
   );
 
-  const mimeType = detectMimeType(response.headers.get('content-type'), normalizedSourceUrl);
+  const mimeType = detectMimeType(response.headers.get('content-type'), finalUrl);
   const hash = hashBuffer(data);
-  const filename = sanitizeFilename(getFilenameFromUrl(normalizedSourceUrl));
+  const filename = sanitizeFilename(getFilenameFromUrl(finalUrl));
   const cacheDirectory = getDesignCacheDirectory();
   await mkdir(cacheDirectory, { recursive: true });
 
   const filePath = path.join(cacheDirectory, `${hash}-${filename}`);
+  await assertDesignCacheCapacity(cacheDirectory, filePath, data.length);
   await writeFile(filePath, data);
 
   const uri = `${RESOURCE_URI_PREFIX}${hash}/${filename}`;
@@ -909,16 +913,16 @@ async function fetchImageContent(url: string): Promise<ImageContent | null> {
     return null;
   }
 
-  const response = await httpClient.get(url, {
-    timeout: REQUEST_CONFIG.TIMEOUT,
-    redirect: 'manual',
+  const {
+    response,
+    finalUrl,
+  } = await fetchAppleDesignAssetResponse(url, 'Apple Design image preview', {
     headers: {
       Accept: 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
     },
   });
-  validateAppleDesignFinalResponseUrl(response, 'Apple Design image preview');
 
-  const mimeType = detectMimeType(response.headers.get('content-type'), url);
+  const mimeType = detectMimeType(response.headers.get('content-type'), finalUrl);
   if (!isImageMimeType(mimeType)) {
     return null;
   }
@@ -1684,15 +1688,77 @@ function validateDownloadUrl(url: string): void {
   }
 }
 
+async function fetchAppleDesignAssetResponse(
+  url: string,
+  description: string,
+  options: { headers: Record<string, string> },
+): Promise<{ response: Response; finalUrl: string }> {
+  let currentUrl = url;
+  validateAppleDesignRedirectUrl(currentUrl, description);
+
+  for (let redirectCount = 0; redirectCount <= MAX_APPLE_DESIGN_REDIRECTS; redirectCount++) {
+    const response = await httpClient.get(currentUrl, {
+      timeout: REQUEST_CONFIG.TIMEOUT,
+      redirect: 'manual',
+      allowManualRedirect: true,
+      headers: options.headers,
+    });
+    validateAppleDesignFinalResponseUrl(response, description);
+
+    if (!isRedirectResponse(response)) {
+      return {
+        response,
+        finalUrl: response.url || currentUrl,
+      };
+    }
+
+    if (redirectCount === MAX_APPLE_DESIGN_REDIRECTS) {
+      throw new Error(`${description} exceeded the ${MAX_APPLE_DESIGN_REDIRECTS} redirect limit.`);
+    }
+
+    const redirectUrl = getAppleDesignRedirectUrl(response, currentUrl, description);
+    validateAppleDesignRedirectUrl(redirectUrl, description);
+    currentUrl = redirectUrl;
+  }
+
+  throw new Error(`${description} exceeded the ${MAX_APPLE_DESIGN_REDIRECTS} redirect limit.`);
+}
+
+function getAppleDesignRedirectUrl(
+  response: Response,
+  currentUrl: string,
+  description: string,
+): string {
+  const location = response.headers.get('location');
+  if (!location) {
+    throw new Error(`${description} returned a redirect without a Location header.`);
+  }
+
+  const redirectUrl = normalizeUrl(location, currentUrl);
+  if (!redirectUrl) {
+    throw new Error(`${description} returned an invalid redirect URL.`);
+  }
+
+  return redirectUrl;
+}
+
+function isRedirectResponse(response: Response): boolean {
+  return response.status >= 300 && response.status < 400;
+}
+
+function validateAppleDesignRedirectUrl(url: string, description: string): void {
+  const parsedUrl = safeUrl(url);
+  if (!parsedUrl || parsedUrl.protocol !== 'https:' || !APPLE_DESIGN_DOWNLOAD_HOSTS.has(parsedUrl.hostname)) {
+    throw new Error(`${description} redirected to a URL outside the Apple Design allowlist.`);
+  }
+}
+
 function validateAppleDesignFinalResponseUrl(response: Response, description: string): void {
   if (!response.url) {
     return;
   }
 
-  const parsedUrl = safeUrl(response.url);
-  if (!parsedUrl || parsedUrl.protocol !== 'https:' || !APPLE_DESIGN_DOWNLOAD_HOSTS.has(parsedUrl.hostname)) {
-    throw new Error(`${description} redirected to a URL outside the Apple Design allowlist.`);
-  }
+  validateAppleDesignRedirectUrl(response.url, description);
 }
 
 function isDirectImageUrl(url: string): boolean {
@@ -1804,6 +1870,82 @@ async function readLimitedResponseBytes(
   }
 
   return Buffer.concat(chunks, totalBytes);
+}
+
+async function assertDesignCacheCapacity(
+  cacheDirectory: string,
+  filePath: string,
+  incomingBytes: number,
+): Promise<void> {
+  const cacheMaxBytes = getDesignCacheMaxBytes();
+  const currentBytes = await getDirectoryFileBytes(cacheDirectory);
+  const existingBytes = await getFileSize(filePath);
+  const projectedBytes = Math.max(0, currentBytes - existingBytes) + incomingBytes;
+
+  if (projectedBytes > cacheMaxBytes) {
+    throw new Error(
+      `Apple Design download cache exceeds the ${cacheMaxBytes} byte cache limit.`,
+    );
+  }
+}
+
+function getDesignCacheMaxBytes(): number {
+  const configuredLimit = process.env.APPLE_DOCS_MCP_CACHE_MAX_BYTES;
+  if (!configuredLimit) {
+    return DEFAULT_DOWNLOAD_CACHE_MAX_BYTES;
+  }
+
+  const parsedLimit = Number.parseInt(configuredLimit, 10);
+  if (Number.isNaN(parsedLimit) || parsedLimit <= 0) {
+    return DEFAULT_DOWNLOAD_CACHE_MAX_BYTES;
+  }
+
+  return parsedLimit;
+}
+
+async function getDirectoryFileBytes(directory: string): Promise<number> {
+  let entries: Dirent[];
+  try {
+    entries = await readdir(directory, { withFileTypes: true });
+  } catch (error) {
+    if (hasErrorCode(error, 'ENOENT')) {
+      return 0;
+    }
+    throw error;
+  }
+
+  let totalBytes = 0;
+  for (const entry of entries) {
+    if (entry.isFile()) {
+      totalBytes += await getFileSize(path.join(directory, entry.name));
+    }
+  }
+
+  return totalBytes;
+}
+
+async function getFileSize(filePath: string): Promise<number> {
+  try {
+    const fileStats = await stat(filePath);
+    if (!fileStats.isFile()) {
+      return 0;
+    }
+    return fileStats.size;
+  } catch (error) {
+    if (hasErrorCode(error, 'ENOENT')) {
+      return 0;
+    }
+    throw error;
+  }
+}
+
+function hasErrorCode(error: unknown, code: string): boolean {
+  if (typeof error !== 'object' || error === null) {
+    return false;
+  }
+
+  const errorWithCode = error as { code?: unknown };
+  return errorWithCode.code === code;
 }
 
 function getDesignCacheDirectory(): string {

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
@@ -263,6 +263,15 @@ function createResponseWithUrl(
   return response;
 }
 
+function createRedirectResponse(location: string): Response {
+  return new Response(null, {
+    status: 302,
+    headers: {
+      location,
+    },
+  });
+}
+
 beforeEach(async () => {
   temporaryCacheDirectory = await mkdtemp(path.join(tmpdir(), 'apple-design-test-'));
   process.env.APPLE_DOCS_MCP_CACHE_DIR = temporaryCacheDirectory;
@@ -273,6 +282,7 @@ beforeEach(async () => {
 afterEach(async () => {
   clearDesignResourceCacheForTesting();
   delete process.env.APPLE_DOCS_MCP_CACHE_DIR;
+  delete process.env.APPLE_DOCS_MCP_CACHE_MAX_BYTES;
 
   if (temporaryCacheDirectory) {
     await rm(temporaryCacheDirectory, {
@@ -435,7 +445,57 @@ describe('Apple Design downloads and resources', () => {
     })).rejects.toThrow('not allowed');
   });
 
-  it('should reject downloads redirected outside the Apple allowlist', async () => {
+  it('should follow allowed Apple download redirects manually', async () => {
+    const archiveBytes = Buffer.from('zip-bytes');
+    (httpClient.get as jest.Mock)
+      .mockResolvedValueOnce(createRedirectResponse('https://devimages-cdn.apple.com/design/templates.zip'))
+      .mockResolvedValueOnce(createResponse(archiveBytes, 'application/zip'));
+
+    const result = await handleDownloadAppleDesignResource({
+      url: 'https://developer.apple.com/design/downloads/templates.zip',
+    });
+
+    expect(result.content).toEqual([
+      expect.objectContaining({
+        type: 'text',
+        text: expect.stringContaining('Downloaded Apple Design resource'),
+      }),
+      expect.objectContaining({
+        type: 'resource_link',
+        mimeType: 'application/zip',
+        name: 'templates.zip',
+      }),
+    ]);
+    expect(httpClient.get).toHaveBeenNthCalledWith(
+      1,
+      'https://developer.apple.com/design/downloads/templates.zip',
+      expect.objectContaining({
+        allowManualRedirect: true,
+        redirect: 'manual',
+      }),
+    );
+    expect(httpClient.get).toHaveBeenNthCalledWith(
+      2,
+      'https://devimages-cdn.apple.com/design/templates.zip',
+      expect.objectContaining({
+        allowManualRedirect: true,
+        redirect: 'manual',
+      }),
+    );
+  });
+
+  it('should reject download redirects outside the Apple allowlist before fetching them', async () => {
+    (httpClient.get as jest.Mock).mockResolvedValue(
+      createRedirectResponse('https://example.com/templates.zip'),
+    );
+
+    await expect(handleDownloadAppleDesignResource({
+      url: 'https://developer.apple.com/design/downloads/templates.zip',
+    })).rejects.toThrow('outside the Apple Design allowlist');
+    expect(httpClient.get).toHaveBeenCalledTimes(1);
+  });
+
+  it('should reject download responses whose final URL is outside the Apple allowlist', async () => {
     const archiveBytes = Buffer.from('zip-bytes');
     (httpClient.get as jest.Mock).mockResolvedValue(
       createResponseWithUrl(archiveBytes, 'application/zip', 'https://example.com/templates.zip'),
@@ -446,7 +506,10 @@ describe('Apple Design downloads and resources', () => {
     })).rejects.toThrow('outside the Apple Design allowlist');
     expect(httpClient.get).toHaveBeenCalledWith(
       'https://developer.apple.com/design/downloads/templates.zip',
-      expect.objectContaining({ redirect: 'manual' }),
+      expect.objectContaining({
+        allowManualRedirect: true,
+        redirect: 'manual',
+      }),
     );
   });
 
@@ -497,6 +560,35 @@ describe('Apple Design downloads and resources', () => {
       maxBytes: 4,
     })).rejects.toThrow('exceeds');
     expect(httpClient.get).toHaveBeenCalledTimes(1);
+  });
+
+  it('should reject downloads that exceed the aggregate cache limit', async () => {
+    process.env.APPLE_DOCS_MCP_CACHE_MAX_BYTES = '10';
+    const firstArchiveBytes = Buffer.from('123456');
+    const secondArchiveBytes = Buffer.from('abcdef');
+    (httpClient.get as jest.Mock)
+      .mockResolvedValueOnce(createResponse(firstArchiveBytes, 'application/zip'))
+      .mockResolvedValueOnce(createResponse(secondArchiveBytes, 'application/zip'));
+
+    await handleDownloadAppleDesignResource({
+      url: 'https://developer.apple.com/design/downloads/one.zip',
+    });
+
+    await expect(handleDownloadAppleDesignResource({
+      url: 'https://developer.apple.com/design/downloads/two.zip',
+    })).rejects.toThrow('cache limit');
+  });
+
+  it('should count existing cache-directory files toward the aggregate cache limit', async () => {
+    process.env.APPLE_DOCS_MCP_CACHE_MAX_BYTES = '10';
+    await writeFile(path.join(temporaryCacheDirectory ?? '', 'old-download.zip'), '12345678');
+    (httpClient.get as jest.Mock).mockResolvedValue(
+      createResponse(Buffer.from('abc'), 'application/zip'),
+    );
+
+    await expect(handleDownloadAppleDesignResource({
+      url: 'https://developer.apple.com/design/downloads/new.zip',
+    })).rejects.toThrow('cache limit');
   });
 });
 
@@ -572,7 +664,59 @@ describe('Apple Design examples', () => {
     );
   });
 
-  it('should reject direct image examples redirected outside the Apple allowlist', async () => {
+  it('should follow allowed Apple image redirects manually', async () => {
+    const imageBytes = Buffer.from('preview-image');
+    (httpClient.get as jest.Mock)
+      .mockResolvedValueOnce(createRedirectResponse('https://docs-assets.developer.apple.com/design/example.png'))
+      .mockResolvedValueOnce(createResponse(imageBytes, 'image/png'));
+
+    const result = await handleGetAppleDesignExamples({
+      url: 'https://developer.apple.com/design/images/example.png',
+      limit: 1,
+    });
+
+    expect(result.content).toEqual([
+      expect.objectContaining({
+        type: 'text',
+        text: expect.stringContaining('Apple Design Examples'),
+      }),
+      expect.objectContaining({
+        type: 'image',
+        data: imageBytes.toString('base64'),
+        mimeType: 'image/png',
+      }),
+    ]);
+    expect(httpClient.get).toHaveBeenNthCalledWith(
+      1,
+      'https://developer.apple.com/design/images/example.png',
+      expect.objectContaining({
+        allowManualRedirect: true,
+        redirect: 'manual',
+      }),
+    );
+    expect(httpClient.get).toHaveBeenNthCalledWith(
+      2,
+      'https://docs-assets.developer.apple.com/design/example.png',
+      expect.objectContaining({
+        allowManualRedirect: true,
+        redirect: 'manual',
+      }),
+    );
+  });
+
+  it('should reject direct image examples redirected outside the Apple allowlist before fetching them', async () => {
+    (httpClient.get as jest.Mock).mockResolvedValue(
+      createRedirectResponse('https://example.com/example.png'),
+    );
+
+    await expect(handleGetAppleDesignExamples({
+      url: 'https://developer.apple.com/design/images/example.png',
+      limit: 1,
+    })).rejects.toThrow('outside the Apple Design allowlist');
+    expect(httpClient.get).toHaveBeenCalledTimes(1);
+  });
+
+  it('should reject direct image example responses whose final URL is outside the Apple allowlist', async () => {
     const imageBytes = Buffer.from('preview-image');
     (httpClient.get as jest.Mock).mockResolvedValue(
       createResponseWithUrl(imageBytes, 'image/png', 'https://example.com/example.png'),
@@ -584,7 +728,10 @@ describe('Apple Design examples', () => {
     })).rejects.toThrow('outside the Apple Design allowlist');
     expect(httpClient.get).toHaveBeenCalledWith(
       'https://developer.apple.com/design/images/example.png',
-      expect.objectContaining({ redirect: 'manual' }),
+      expect.objectContaining({
+        allowManualRedirect: true,
+        redirect: 'manual',
+      }),
     );
   });
 
