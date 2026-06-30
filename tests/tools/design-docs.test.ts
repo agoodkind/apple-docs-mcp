@@ -782,6 +782,38 @@ describe('Apple Design examples', () => {
     expect(httpClient.get).toHaveBeenCalledTimes(1);
   });
 
+  it('should keep trying example candidates until limit fetchable images are found', async () => {
+    const html = `
+      <main>
+        <img src="https://docs-assets.developer.apple.com/design/not-an-image">
+        <img src="https://docs-assets.developer.apple.com/design/valid-preview.png">
+      </main>
+    `;
+    const imageBytes = Buffer.from('valid-preview');
+    (httpClient.get as jest.Mock)
+      .mockResolvedValueOnce(createResponse(Buffer.from(html), 'text/html'))
+      .mockResolvedValueOnce(createResponse(Buffer.from('not-image'), 'text/plain'))
+      .mockResolvedValueOnce(createResponse(imageBytes, 'image/png'));
+
+    const result = await handleGetAppleDesignExamples({
+      url: 'https://developer.apple.com/design/get-started/',
+      limit: 1,
+    });
+
+    expect(result.content).toEqual([
+      expect.objectContaining({
+        type: 'text',
+        text: expect.stringContaining('Found 1 image example.'),
+      }),
+      expect.objectContaining({
+        type: 'image',
+        data: imageBytes.toString('base64'),
+        mimeType: 'image/png',
+      }),
+    ]);
+    expect(httpClient.get).toHaveBeenCalledTimes(3);
+  });
+
   it('should extract HIG image examples from tabs', async () => {
     const imageBytes = Buffer.from('tab-image');
     const documentWithTabs = {

@@ -396,23 +396,34 @@ export async function handleGetAppleDesignExamples(
 ): Promise<CallToolResult> {
   const limit = args.limit ?? 3;
   const candidates = await collectImageCandidates(args);
-  const uniqueCandidates = dedupeImageCandidates(candidates).slice(0, limit);
-  const content: ContentBlock[] = [
-    createTextContent(`Apple Design Examples\n\nFound ${uniqueCandidates.length} image example${uniqueCandidates.length === 1 ? '' : 's'}.`),
-  ];
+  const uniqueCandidates = dedupeImageCandidates(candidates);
+  const imageContentBlocks: ContentBlock[] = [];
 
   for (const candidate of uniqueCandidates) {
+    if (imageContentBlocks.length >= limit) {
+      break;
+    }
+
     const imageContent = await fetchImageContent(candidate.url);
     if (imageContent) {
-      content.push(imageContent);
+      imageContentBlocks.push(imageContent);
     }
   }
 
-  if (content.length === 1) {
-    content[0] = createTextContent('Apple Design Examples\n\nNo directly fetchable image examples were found.');
+  if (imageContentBlocks.length === 0) {
+    return {
+      content: [
+        createTextContent('Apple Design Examples\n\nNo directly fetchable image examples were found.'),
+      ],
+    };
   }
 
-  return { content };
+  return {
+    content: [
+      createTextContent(`Apple Design Examples\n\nFound ${imageContentBlocks.length} image example${imageContentBlocks.length === 1 ? '' : 's'}.`),
+      ...imageContentBlocks,
+    ],
+  };
 }
 
 /**
