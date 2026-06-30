@@ -24,6 +24,7 @@ const APPLE_DESIGN_DOWNLOAD_HOSTS = new Set([
   'itunespartner.apple.com',
 ]);
 const DEFAULT_DOWNLOAD_MAX_BYTES = 50 * 1024 * 1024;
+const DEFAULT_PREVIEW_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
 const DIRECT_RESOURCE_EXTENSIONS = new Set([
   '.dmg',
   '.fig',
@@ -318,6 +319,7 @@ export async function handleGetAppleDesignContent(
   args: { url: string } | string,
 ): Promise<CallToolResult> {
   const url = typeof args === 'string' ? args : args.url;
+  validateAppleDesignContentUrl(url);
   const content = await fetchAppleDesignContent(url);
   return {
     content: [
@@ -774,16 +776,11 @@ async function downloadDesignResource(
     },
   });
 
-  const contentLength = getContentLength(response);
-  if (contentLength !== undefined && contentLength > byteLimit) {
-    throw new Error(`Apple Design resource exceeds the ${byteLimit} byte download limit.`);
-  }
-
-  const arrayBuffer = await response.arrayBuffer();
-  const data = Buffer.from(arrayBuffer);
-  if (data.length > byteLimit) {
-    throw new Error(`Apple Design resource exceeds the ${byteLimit} byte download limit.`);
-  }
+  const data = await readLimitedResponseBytes(
+    response,
+    byteLimit,
+    'Apple Design resource',
+  );
 
   const mimeType = detectMimeType(response.headers.get('content-type'), normalizedSourceUrl);
   const hash = hashBuffer(data);
@@ -879,6 +876,7 @@ async function collectImageCandidates(args: GetAppleDesignExamplesArgs): Promise
 
   if (args.url) {
     const url = args.url;
+    validateAppleDesignExampleUrl(url);
     if (isDirectImageUrl(url)) {
       candidates.push({ url });
     } else {
@@ -898,7 +896,11 @@ async function collectImageCandidates(args: GetAppleDesignExamplesArgs): Promise
 
 async function fetchImageContent(url: string): Promise<ImageContent | null> {
   const parsedUrl = safeUrl(url);
-  if (!parsedUrl || !APPLE_DESIGN_DOWNLOAD_HOSTS.has(parsedUrl.hostname)) {
+  if (
+    !parsedUrl
+    || parsedUrl.protocol !== 'https:'
+    || !APPLE_DESIGN_DOWNLOAD_HOSTS.has(parsedUrl.hostname)
+  ) {
     return null;
   }
 
@@ -913,7 +915,11 @@ async function fetchImageContent(url: string): Promise<ImageContent | null> {
     return null;
   }
 
-  const data = Buffer.from(await response.arrayBuffer());
+  const data = await readLimitedResponseBytes(
+    response,
+    DEFAULT_PREVIEW_IMAGE_MAX_BYTES,
+    'Apple Design image preview',
+  );
   return {
     type: 'image',
     data: data.toString('base64'),
@@ -1622,6 +1628,38 @@ function isDesignResourcesUrl(url: string): boolean {
   return parsedUrl?.hostname === 'developer.apple.com' && parsedUrl.pathname.startsWith('/design/resources');
 }
 
+function validateAppleDesignContentUrl(url: string): void {
+  if (!isAppleDesignContentUrl(url)) {
+    throw new Error('Apple Design content URLs must use https://developer.apple.com/design/.');
+  }
+}
+
+function validateAppleDesignExampleUrl(url: string): void {
+  if (isDirectImageUrl(url)) {
+    validateAppleDesignImageUrl(url);
+    return;
+  }
+
+  validateAppleDesignContentUrl(url);
+}
+
+function validateAppleDesignImageUrl(url: string): void {
+  const parsedUrl = safeUrl(url);
+  if (!parsedUrl || parsedUrl.protocol !== 'https:' || !APPLE_DESIGN_DOWNLOAD_HOSTS.has(parsedUrl.hostname)) {
+    throw new Error('Apple Design image URLs must use HTTPS and an allowed Apple host.');
+  }
+}
+
+function isAppleDesignContentUrl(url: string): boolean {
+  const parsedUrl = safeUrl(url);
+  return Boolean(
+    parsedUrl
+    && parsedUrl.protocol === 'https:'
+    && parsedUrl.hostname === 'developer.apple.com'
+    && (parsedUrl.pathname === '/design' || parsedUrl.pathname.startsWith('/design/')),
+  );
+}
+
 function isDirectAppleDownloadUrl(url: string): boolean {
   const parsedUrl = safeUrl(url);
   return Boolean(parsedUrl && parsedUrl.protocol === 'https:' && APPLE_DESIGN_DOWNLOAD_HOSTS.has(parsedUrl.hostname));
@@ -1706,6 +1744,50 @@ function getContentLength(response: Response): number | undefined {
     return undefined;
   }
   return contentLength;
+}
+
+async function readLimitedResponseBytes(
+  response: Response,
+  byteLimit: number,
+  description: string,
+): Promise<Buffer> {
+  const contentLength = getContentLength(response);
+  if (contentLength !== undefined && contentLength > byteLimit) {
+    throw new Error(`${description} exceeds the ${byteLimit} byte download limit.`);
+  }
+
+  if (!response.body) {
+    const data = Buffer.from(await response.arrayBuffer());
+    if (data.length > byteLimit) {
+      throw new Error(`${description} exceeds the ${byteLimit} byte download limit.`);
+    }
+    return data;
+  }
+
+  const reader = response.body.getReader();
+  const chunks: Buffer[] = [];
+  let totalBytes = 0;
+
+  try {
+    while (true) {
+      const result = await reader.read();
+      if (result.done) {
+        break;
+      }
+
+      totalBytes += result.value.byteLength;
+      if (totalBytes > byteLimit) {
+        await reader.cancel().catch(() => undefined);
+        throw new Error(`${description} exceeds the ${byteLimit} byte download limit.`);
+      }
+
+      chunks.push(Buffer.from(result.value));
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  return Buffer.concat(chunks, totalBytes);
 }
 
 function getDesignCacheDirectory(): string {

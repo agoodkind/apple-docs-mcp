@@ -6,6 +6,7 @@ import {
   clearDesignResourceCacheForTesting,
   formatAppleDesignDocument,
   handleDownloadAppleDesignResource,
+  handleGetAppleDesignContent,
   handleGetAppleDesignExamples,
   listCachedDesignResources,
   parseAppleDesignHtmlPage,
@@ -270,6 +271,15 @@ afterEach(async () => {
 });
 
 describe('Apple Design document formatting', () => {
+  it('should reject non-Apple Design content URLs before fetching', async () => {
+    await expect(handleGetAppleDesignContent({
+      url: 'https://example.com/design/',
+    })).rejects.toThrow('Apple Design content URLs');
+
+    expect(httpClient.getText).not.toHaveBeenCalled();
+    expect(httpClient.getJson).not.toHaveBeenCalled();
+  });
+
   it('should format HIG JSON content with images, tables, links, platforms, and change logs', () => {
     const result = formatAppleDesignDocument(
       SAMPLE_HIG_DOCUMENT,
@@ -447,6 +457,24 @@ describe('Apple Design downloads and resources', () => {
 });
 
 describe('Apple Design examples', () => {
+  it('should reject non-Apple example page URLs before fetching', async () => {
+    await expect(handleGetAppleDesignExamples({
+      url: 'https://example.com/design/example-page',
+    })).rejects.toThrow('Apple Design content URLs');
+
+    expect(httpClient.getText).not.toHaveBeenCalled();
+    expect(httpClient.get).not.toHaveBeenCalled();
+  });
+
+  it('should reject direct image URLs from non-Apple hosts before fetching', async () => {
+    await expect(handleGetAppleDesignExamples({
+      url: 'https://example.com/design/example.png',
+    })).rejects.toThrow('allowed Apple host');
+
+    expect(httpClient.getText).not.toHaveBeenCalled();
+    expect(httpClient.get).not.toHaveBeenCalled();
+  });
+
   it('should return HIG image references as MCP image content blocks', async () => {
     const imageBytes = Buffer.from('hig-image');
     (httpClient.getJson as jest.Mock).mockResolvedValue(SAMPLE_HIG_DOCUMENT);
@@ -470,5 +498,53 @@ describe('Apple Design examples', () => {
         mimeType: 'image/png',
       }),
     ]);
+  });
+
+  it('should return direct Apple image URLs as MCP image content blocks', async () => {
+    const imageBytes = Buffer.from('preview-image');
+    (httpClient.get as jest.Mock).mockResolvedValue(
+      createResponse(imageBytes, 'image/png'),
+    );
+
+    const result = await handleGetAppleDesignExamples({
+      url: 'https://developer.apple.com/design/images/example.png',
+      limit: 1,
+    });
+
+    expect(result.content).toEqual([
+      expect.objectContaining({
+        type: 'text',
+        text: expect.stringContaining('Apple Design Examples'),
+      }),
+      expect.objectContaining({
+        type: 'image',
+        data: imageBytes.toString('base64'),
+        mimeType: 'image/png',
+      }),
+    ]);
+    expect(httpClient.get).toHaveBeenCalledWith(
+      'https://developer.apple.com/design/images/example.png',
+      expect.any(Object),
+    );
+  });
+
+  it('should reject oversized direct image examples before reading the body', async () => {
+    const arrayBuffer = jest.fn();
+    const oversizedResponse = {
+      headers: new Headers({
+        'content-length': String(11 * 1024 * 1024),
+        'content-type': 'image/png',
+      }),
+      body: null,
+      arrayBuffer,
+    } as unknown as Response;
+    (httpClient.get as jest.Mock).mockResolvedValue(oversizedResponse);
+
+    await expect(handleGetAppleDesignExamples({
+      url: 'https://developer.apple.com/design/images/huge.png',
+      limit: 1,
+    })).rejects.toThrow('Apple Design image preview exceeds');
+
+    expect(arrayBuffer).not.toHaveBeenCalled();
   });
 });

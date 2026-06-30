@@ -102,6 +102,7 @@ describe('URL Converter', () => {
   describe('isAppleDesignUrl', () => {
     it('should return true for Apple Design URLs', () => {
       const validUrls = [
+        'https://developer.apple.com/design',
         'https://developer.apple.com/design/',
         'https://developer.apple.com/design/resources/',
         'https://developer.apple.com/design/human-interface-guidelines/layout',
