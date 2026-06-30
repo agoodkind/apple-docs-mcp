@@ -251,6 +251,18 @@ function createResponse(
   });
 }
 
+function createResponseWithUrl(
+  data: Buffer,
+  contentType: string | undefined,
+  url: string,
+): Response {
+  const response = createResponse(data, contentType);
+  Object.defineProperty(response, 'url', {
+    value: url,
+  });
+  return response;
+}
+
 beforeEach(async () => {
   temporaryCacheDirectory = await mkdtemp(path.join(tmpdir(), 'apple-design-test-'));
   process.env.APPLE_DOCS_MCP_CACHE_DIR = temporaryCacheDirectory;
@@ -423,6 +435,17 @@ describe('Apple Design downloads and resources', () => {
     })).rejects.toThrow('not allowed');
   });
 
+  it('should reject downloads redirected outside the Apple allowlist', async () => {
+    const archiveBytes = Buffer.from('zip-bytes');
+    (httpClient.get as jest.Mock).mockResolvedValue(
+      createResponseWithUrl(archiveBytes, 'application/zip', 'https://example.com/templates.zip'),
+    );
+
+    await expect(handleDownloadAppleDesignResource({
+      url: 'https://developer.apple.com/design/downloads/templates.zip',
+    })).rejects.toThrow('outside the Apple Design allowlist');
+  });
+
   it('should reject oversized downloads before reading the body', async () => {
     const archiveBytes = Buffer.from('zip-bytes');
     (httpClient.get as jest.Mock).mockResolvedValue(
@@ -453,6 +476,23 @@ describe('Apple Design downloads and resources', () => {
 
     expect(httpClient.get).toHaveBeenCalledTimes(1);
     expect(firstLink?.uri).toBe(secondLink?.uri);
+  });
+
+  it('should enforce smaller maxBytes limits on duplicate cache hits', async () => {
+    const archiveBytes = Buffer.from('zip-bytes');
+    (httpClient.get as jest.Mock).mockResolvedValue(
+      createResponse(archiveBytes, 'application/zip'),
+    );
+
+    await handleDownloadAppleDesignResource({
+      url: 'https://developer.apple.com/design/downloads/templates.zip',
+    });
+
+    await expect(handleDownloadAppleDesignResource({
+      url: 'https://developer.apple.com/design/downloads/templates.zip',
+      maxBytes: 4,
+    })).rejects.toThrow('exceeds');
+    expect(httpClient.get).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -526,6 +566,18 @@ describe('Apple Design examples', () => {
       'https://developer.apple.com/design/images/example.png',
       expect.any(Object),
     );
+  });
+
+  it('should reject direct image examples redirected outside the Apple allowlist', async () => {
+    const imageBytes = Buffer.from('preview-image');
+    (httpClient.get as jest.Mock).mockResolvedValue(
+      createResponseWithUrl(imageBytes, 'image/png', 'https://example.com/example.png'),
+    );
+
+    await expect(handleGetAppleDesignExamples({
+      url: 'https://developer.apple.com/design/images/example.png',
+      limit: 1,
+    })).rejects.toThrow('outside the Apple Design allowlist');
   });
 
   it('should reject oversized direct image examples before reading the body', async () => {

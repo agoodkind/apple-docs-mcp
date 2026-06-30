@@ -763,18 +763,22 @@ async function downloadDesignResource(
   maxBytes: number | undefined,
 ): Promise<CachedDesignResource> {
   const normalizedSourceUrl = resource.downloadUrl;
+  const byteLimit = maxBytes ?? DEFAULT_DOWNLOAD_MAX_BYTES;
   const cachedResource = cachedResourcesBySourceUrl.get(normalizedSourceUrl);
   if (cachedResource) {
+    if (cachedResource.size > byteLimit) {
+      throw new Error(`Apple Design resource exceeds the ${byteLimit} byte download limit.`);
+    }
     return cachedResource;
   }
 
-  const byteLimit = maxBytes ?? DEFAULT_DOWNLOAD_MAX_BYTES;
   const response = await httpClient.get(normalizedSourceUrl, {
     timeout: REQUEST_CONFIG.TIMEOUT,
     headers: {
       Accept: '*/*',
     },
   });
+  validateAppleDesignFinalResponseUrl(response, 'Apple Design resource');
 
   const data = await readLimitedResponseBytes(
     response,
@@ -910,6 +914,8 @@ async function fetchImageContent(url: string): Promise<ImageContent | null> {
       Accept: 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
     },
   });
+  validateAppleDesignFinalResponseUrl(response, 'Apple Design image preview');
+
   const mimeType = detectMimeType(response.headers.get('content-type'), url);
   if (!isImageMimeType(mimeType)) {
     return null;
@@ -1676,6 +1682,17 @@ function validateDownloadUrl(url: string): void {
   }
 }
 
+function validateAppleDesignFinalResponseUrl(response: Response, description: string): void {
+  if (!response.url) {
+    return;
+  }
+
+  const parsedUrl = safeUrl(response.url);
+  if (!parsedUrl || parsedUrl.protocol !== 'https:' || !APPLE_DESIGN_DOWNLOAD_HOSTS.has(parsedUrl.hostname)) {
+    throw new Error(`${description} redirected to a URL outside the Apple Design allowlist.`);
+  }
+}
+
 function isDirectImageUrl(url: string): boolean {
   const mimeType = detectMimeType(undefined, url);
   return isImageMimeType(mimeType);
@@ -1769,12 +1786,8 @@ async function readLimitedResponseBytes(
   let totalBytes = 0;
 
   try {
-    while (true) {
-      const result = await reader.read();
-      if (result.done) {
-        break;
-      }
-
+    let result = await reader.read();
+    while (!result.done) {
       totalBytes += result.value.byteLength;
       if (totalBytes > byteLimit) {
         await reader.cancel().catch(() => undefined);
@@ -1782,6 +1795,7 @@ async function readLimitedResponseBytes(
       }
 
       chunks.push(Buffer.from(result.value));
+      result = await reader.read();
     }
   } finally {
     reader.releaseLock();

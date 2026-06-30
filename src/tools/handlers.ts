@@ -172,7 +172,7 @@ export const toolHandlers: Record<string, ToolHandler> = {
   },
 
   list_apple_design_resources: async (args, server) => {
-    const validatedArgs = listAppleDesignResourcesSchema.parse(args);
+    const validatedArgs = listAppleDesignResourcesSchema.parse(args ?? {});
     return await server.listAppleDesignResources(
       validatedArgs.category,
       validatedArgs.platform,
@@ -183,7 +183,7 @@ export const toolHandlers: Record<string, ToolHandler> = {
   },
 
   download_apple_design_resource: async (args, server) => {
-    const validatedArgs = downloadAppleDesignResourceSchema.parse(args);
+    const validatedArgs = downloadAppleDesignResourceSchema.parse(args ?? {});
     return await server.downloadAppleDesignResource(
       validatedArgs.resourceId,
       validatedArgs.url,
@@ -192,7 +192,7 @@ export const toolHandlers: Record<string, ToolHandler> = {
   },
 
   get_apple_design_examples: async (args, server) => {
-    const validatedArgs = getAppleDesignExamplesSchema.parse(args);
+    const validatedArgs = getAppleDesignExamplesSchema.parse(args ?? {});
     return await server.getAppleDesignExamples(
       validatedArgs.url,
       validatedArgs.resourceId,

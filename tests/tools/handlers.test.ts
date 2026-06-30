@@ -182,6 +182,21 @@ describe('Tool Handlers', () => {
       });
     });
 
+    it('should handle list_apple_design_resources tool with omitted arguments', async () => {
+      const result = await handleToolCall('list_apple_design_resources', undefined, mockServer);
+
+      expect(mockServer.listAppleDesignResources).toHaveBeenCalledWith(
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        50,
+      );
+      expect(result).toEqual({
+        content: [{ type: 'text', text: 'Design resources' }],
+      });
+    });
+
     it('should handle download_apple_design_resource tool with resource links', async () => {
       const args = { resourceId: 'design-resource:templates:ios:download' };
       const result = await handleToolCall('download_apple_design_resource', args, mockServer);
@@ -202,6 +217,16 @@ describe('Tool Handlers', () => {
       ]);
     });
 
+    it('should handle download_apple_design_resource tool with omitted arguments', async () => {
+      await handleToolCall('download_apple_design_resource', undefined, mockServer);
+
+      expect(mockServer.downloadAppleDesignResource).toHaveBeenCalledWith(
+        undefined,
+        undefined,
+        undefined,
+      );
+    });
+
     it('should handle get_apple_design_examples tool with image blocks', async () => {
       const args = {
         url: 'https://developer.apple.com/design/human-interface-guidelines/layout',
@@ -210,6 +235,25 @@ describe('Tool Handlers', () => {
       const result = await handleToolCall('get_apple_design_examples', args, mockServer);
 
       expect(mockServer.getAppleDesignExamples).toHaveBeenCalledWith(args.url, undefined, undefined, 1);
+      expect(result.content).toEqual([
+        { type: 'text', text: 'Design examples' },
+        {
+          type: 'image',
+          data: Buffer.from('image').toString('base64'),
+          mimeType: 'image/png',
+        },
+      ]);
+    });
+
+    it('should handle get_apple_design_examples tool with omitted arguments', async () => {
+      const result = await handleToolCall('get_apple_design_examples', undefined, mockServer);
+
+      expect(mockServer.getAppleDesignExamples).toHaveBeenCalledWith(
+        undefined,
+        undefined,
+        undefined,
+        3,
+      );
       expect(result.content).toEqual([
         { type: 'text', text: 'Design examples' },
         {
