@@ -8,9 +8,9 @@ import type {
   ResourceLink,
 } from '@modelcontextprotocol/sdk/types.js';
 import * as cheerio from 'cheerio';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { Dirent } from 'node:fs';
-import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, open, readFile, readdir, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { designContentCache, designResourcesCache } from '../utils/cache.js';
@@ -794,13 +794,15 @@ async function downloadDesignResource(
   const hash = hashBuffer(data);
   const filename = sanitizeFilename(getFilenameFromUrl(finalUrl));
   const cacheDirectory = getDesignCacheDirectory();
-  await mkdir(cacheDirectory, { recursive: true });
+  await mkdir(cacheDirectory, { recursive: true, mode: 0o700 });
+  await assertDesignCacheCapacity(cacheDirectory, data.length);
 
-  const filePath = path.join(cacheDirectory, `${hash}-${filename}`);
-  await assertDesignCacheCapacity(cacheDirectory, filePath, data.length);
-  await writeFile(filePath, data);
+  const {
+    cacheFilename,
+    filePath,
+  } = await writeExclusiveDesignCacheFile(cacheDirectory, hash, filename, data);
 
-  const uri = `${RESOURCE_URI_PREFIX}${hash}/${filename}`;
+  const uri = `${RESOURCE_URI_PREFIX}${hash}/${cacheFilename}`;
   const newCachedResource: CachedDesignResource = {
     uri,
     name: filename,
@@ -1874,19 +1876,54 @@ async function readLimitedResponseBytes(
 
 async function assertDesignCacheCapacity(
   cacheDirectory: string,
-  filePath: string,
   incomingBytes: number,
 ): Promise<void> {
   const cacheMaxBytes = getDesignCacheMaxBytes();
   const currentBytes = await getDirectoryFileBytes(cacheDirectory);
-  const existingBytes = await getFileSize(filePath);
-  const projectedBytes = Math.max(0, currentBytes - existingBytes) + incomingBytes;
+  const projectedBytes = currentBytes + incomingBytes;
 
   if (projectedBytes > cacheMaxBytes) {
     throw new Error(
       `Apple Design download cache exceeds the ${cacheMaxBytes} byte cache limit.`,
     );
   }
+}
+
+async function writeExclusiveDesignCacheFile(
+  cacheDirectory: string,
+  hash: string,
+  filename: string,
+  data: Buffer,
+): Promise<{ cacheFilename: string; filePath: string }> {
+  for (let attemptCount = 0; attemptCount < 3; attemptCount++) {
+    const cacheFilename = createCacheFilename(hash, filename);
+    const filePath = path.join(cacheDirectory, cacheFilename);
+
+    try {
+      const fileHandle = await open(filePath, 'wx', 0o600);
+      try {
+        await fileHandle.writeFile(data);
+      } finally {
+        await fileHandle.close();
+      }
+
+      return {
+        cacheFilename,
+        filePath,
+      };
+    } catch (error) {
+      if (hasErrorCode(error, 'EEXIST')) {
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  throw new Error('Apple Design cache could not create a unique resource file.');
+}
+
+function createCacheFilename(hash: string, filename: string): string {
+  return `${hash}-${randomUUID()}-${filename}`;
 }
 
 function getDesignCacheMaxBytes(): number {
@@ -1950,7 +1987,7 @@ function hasErrorCode(error: unknown, code: string): boolean {
 
 function getDesignCacheDirectory(): string {
   return process.env.APPLE_DOCS_MCP_CACHE_DIR
-    || path.join(tmpdir(), 'apple-docs-mcp', 'design-resources');
+    ?? path.join(tmpdir(), 'apple-docs-mcp', 'design-resources');
 }
 
 function createTextContent(text: string): ContentBlock {

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
+import { createHash } from 'node:crypto';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -404,6 +405,9 @@ describe('Apple Design downloads and resources', () => {
       mimeType: 'image/png',
       name: 'example.png',
     });
+    const imageHash = createHash('sha256').update(imageBytes).digest('hex');
+    expect(resourceLink?.uri).toContain(`apple-design://cache/${imageHash}/${imageHash}-`);
+    expect(resourceLink?.uri).not.toBe(`apple-design://cache/${imageHash}/example.png`);
 
     const resources = await listCachedDesignResources();
     expect(resources.resources).toHaveLength(1);
