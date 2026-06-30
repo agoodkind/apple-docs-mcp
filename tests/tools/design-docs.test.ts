@@ -9,6 +9,7 @@ import {
   handleDownloadAppleDesignResource,
   handleGetAppleDesignContent,
   handleGetAppleDesignExamples,
+  handleSearchAppleDesignDocs,
   listCachedDesignResources,
   parseAppleDesignHtmlPage,
   parseDesignResourcesHtml,
@@ -252,6 +253,10 @@ function createResponse(
   });
 }
 
+function createJsonResponse(data: unknown): Response {
+  return createResponse(Buffer.from(JSON.stringify(data)), 'application/json');
+}
+
 function createResponseWithUrl(
   data: Buffer,
   contentType: string | undefined,
@@ -303,6 +308,54 @@ describe('Apple Design document formatting', () => {
     expect(httpClient.getJson).not.toHaveBeenCalled();
   });
 
+  it('should follow allowed Apple Design content redirects manually', async () => {
+    const html = `
+      <main>
+        <h1>Design Resources</h1>
+        <p>Download templates.</p>
+      </main>
+    `;
+    (httpClient.get as jest.Mock)
+      .mockResolvedValueOnce(createRedirectResponse('https://developer.apple.com/design/resources/'))
+      .mockResolvedValueOnce(createResponse(Buffer.from(html), 'text/html'));
+
+    const result = await handleGetAppleDesignContent({
+      url: 'https://developer.apple.com/design/',
+    });
+
+    expect(result.content[0]).toMatchObject({
+      type: 'text',
+      text: expect.stringContaining('# Design Resources'),
+    });
+    expect(httpClient.get).toHaveBeenNthCalledWith(
+      1,
+      'https://developer.apple.com/design/',
+      expect.objectContaining({
+        allowManualRedirect: true,
+        redirect: 'manual',
+      }),
+    );
+    expect(httpClient.get).toHaveBeenNthCalledWith(
+      2,
+      'https://developer.apple.com/design/resources/',
+      expect.objectContaining({
+        allowManualRedirect: true,
+        redirect: 'manual',
+      }),
+    );
+  });
+
+  it('should reject Apple Design content redirects outside the content allowlist', async () => {
+    (httpClient.get as jest.Mock).mockResolvedValue(
+      createRedirectResponse('https://example.com/design/'),
+    );
+
+    await expect(handleGetAppleDesignContent({
+      url: 'https://developer.apple.com/design/',
+    })).rejects.toThrow('outside the Apple Design content allowlist');
+    expect(httpClient.get).toHaveBeenCalledTimes(1);
+  });
+
   it('should format HIG JSON content with images, tables, links, platforms, and change logs', () => {
     const result = formatAppleDesignDocument(
       SAMPLE_HIG_DOCUMENT,
@@ -340,6 +393,30 @@ describe('Apple Design document formatting', () => {
     expect(result).toContain('# Apple Design');
     expect(result).toContain('Design great apps and games.');
     expect(result).toContain('[Design resources](https://developer.apple.com/design/resources/)');
+  });
+});
+
+describe('Apple Design search', () => {
+  it('should apply platform filters to HIG search results', async () => {
+    (httpClient.get as jest.Mock).mockResolvedValue(createJsonResponse(SAMPLE_HIG_DOCUMENT));
+
+    const result = await handleSearchAppleDesignDocs({
+      query: 'Layout',
+      contentType: 'hig',
+      platform: 'watchOS',
+    });
+
+    expect(result.content[0]).toMatchObject({
+      type: 'text',
+      text: expect.stringContaining('No Apple Design results found.'),
+    });
+    expect(httpClient.get).toHaveBeenCalledWith(
+      'https://developer.apple.com/tutorials/data/design/human-interface-guidelines.json',
+      expect.objectContaining({
+        allowManualRedirect: true,
+        redirect: 'manual',
+      }),
+    );
   });
 });
 
@@ -635,21 +712,107 @@ describe('Apple Design examples', () => {
   });
 
   it('should reject unknown resource IDs for examples', async () => {
-    (httpClient.getText as jest.Mock).mockResolvedValue('<html><body></body></html>');
+    (httpClient.get as jest.Mock).mockResolvedValue(
+      createResponse(Buffer.from('<html><body></body></html>'), 'text/html'),
+    );
 
     await expect(handleGetAppleDesignExamples({
       resourceId: 'missing-resource-id',
     })).rejects.toThrow('Unknown Apple Design resourceId');
 
-    expect(httpClient.get).not.toHaveBeenCalled();
+    expect(httpClient.get).toHaveBeenCalledTimes(1);
   });
 
   it('should return HIG image references as MCP image content blocks', async () => {
     const imageBytes = Buffer.from('hig-image');
-    (httpClient.getJson as jest.Mock).mockResolvedValue(SAMPLE_HIG_DOCUMENT);
+    (httpClient.get as jest.Mock)
+      .mockResolvedValueOnce(createJsonResponse(SAMPLE_HIG_DOCUMENT))
+      .mockResolvedValueOnce(createResponse(imageBytes, 'image/png'));
+
+    const result = await handleGetAppleDesignExamples({
+      url: 'https://developer.apple.com/design/human-interface-guidelines/layout',
+      limit: 1,
+    });
+
+    expect(result.content).toEqual([
+      expect.objectContaining({
+        type: 'text',
+        text: expect.stringContaining('Apple Design Examples'),
+      }),
+      expect.objectContaining({
+        type: 'image',
+        data: imageBytes.toString('base64'),
+        mimeType: 'image/png',
+      }),
+    ]);
+  });
+
+  it('should return direct Apple CDN images without path extensions', async () => {
+    const imageBytes = Buffer.from('cdn-preview-image');
     (httpClient.get as jest.Mock).mockResolvedValue(
       createResponse(imageBytes, 'image/png'),
     );
+
+    const result = await handleGetAppleDesignExamples({
+      url: 'https://docs-assets.developer.apple.com/design/preview',
+      limit: 1,
+    });
+
+    expect(result.content).toEqual([
+      expect.objectContaining({
+        type: 'text',
+        text: expect.stringContaining('Apple Design Examples'),
+      }),
+      expect.objectContaining({
+        type: 'image',
+        data: imageBytes.toString('base64'),
+        mimeType: 'image/png',
+      }),
+    ]);
+  });
+
+  it('should reject Apple Design example page redirects outside the content allowlist', async () => {
+    (httpClient.get as jest.Mock).mockResolvedValue(
+      createRedirectResponse('https://example.com/design/example-page'),
+    );
+
+    await expect(handleGetAppleDesignExamples({
+      url: 'https://developer.apple.com/design/get-started/',
+    })).rejects.toThrow('outside the Apple Design content allowlist');
+    expect(httpClient.get).toHaveBeenCalledTimes(1);
+  });
+
+  it('should extract HIG image examples from tabs', async () => {
+    const imageBytes = Buffer.from('tab-image');
+    const documentWithTabs = {
+      ...SAMPLE_HIG_DOCUMENT,
+      references: {},
+      primaryContentSections: [
+        {
+          kind: 'content',
+          content: [
+            {
+              type: 'tabNavigator',
+              tabs: [
+                {
+                  title: 'iOS',
+                  content: [
+                    {
+                      type: 'image',
+                      url: '/assets/elements/icons/tab-example.png',
+                      alt: 'A tabbed image',
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+    (httpClient.get as jest.Mock)
+      .mockResolvedValueOnce(createJsonResponse(documentWithTabs))
+      .mockResolvedValueOnce(createResponse(imageBytes, 'image/png'));
 
     const result = await handleGetAppleDesignExamples({
       url: 'https://developer.apple.com/design/human-interface-guidelines/layout',

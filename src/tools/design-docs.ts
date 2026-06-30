@@ -84,6 +84,8 @@ interface DesignImageCandidate {
   alt?: string;
 }
 
+type AppleDesignUrlValidator = (url: string, description: string) => void;
+
 export interface SearchAppleDesignDocsArgs {
   query: string;
   contentType?: 'all' | 'hig' | 'resource' | 'page';
@@ -460,6 +462,8 @@ export async function readCachedDesignResource(uri: string): Promise<ReadResourc
  * @returns Nothing.
  */
 export function clearDesignResourceCacheForTesting(): void {
+  designContentCache.clear();
+  designResourcesCache.clear();
   cachedResourcesByUri.clear();
   cachedResourcesBySourceUrl.clear();
   resourceCatalogById.clear();
@@ -476,16 +480,16 @@ async function fetchAppleDesignContent(url: string): Promise<string> {
   const jsonUrl = convertToDesignJsonApiUrl(url);
   let content: string;
   if (jsonUrl) {
-    const jsonData = await httpClient.getJson<unknown>(jsonUrl);
+    const jsonData = await fetchAppleDesignJson(jsonUrl);
     content = formatAppleDesignDocument(jsonData, url);
   } else {
-    const html = await httpClient.getText(url);
-    if (isDesignResourcesUrl(url)) {
-      const resources = parseDesignResourcesHtml(html, url);
+    const { html, finalUrl } = await fetchAppleDesignHtml(url);
+    if (isDesignResourcesUrl(finalUrl)) {
+      const resources = parseDesignResourcesHtml(html, finalUrl);
       updateResourceCatalogIndex(resources);
-      content = `${parseAppleDesignHtmlPage(html, url)}\n\n${formatDesignResources(resources)}`;
+      content = `${parseAppleDesignHtmlPage(html, finalUrl)}\n\n${formatDesignResources(resources)}`;
     } else {
-      content = parseAppleDesignHtmlPage(html, url);
+      content = parseAppleDesignHtmlPage(html, finalUrl);
     }
   }
 
@@ -500,8 +504,8 @@ async function getDesignResourcesCatalog(): Promise<DesignResourceCatalogEntry[]
     return cachedResources;
   }
 
-  const html = await httpClient.getText(APPLE_URLS.DESIGN_RESOURCES);
-  const resources = parseDesignResourcesHtml(html, APPLE_URLS.DESIGN_RESOURCES);
+  const { html, finalUrl } = await fetchAppleDesignHtml(APPLE_URLS.DESIGN_RESOURCES);
+  const resources = parseDesignResourcesHtml(html, finalUrl);
   updateResourceCatalogIndex(resources);
   designResourcesCache.set('design-resources', resources);
   return resources;
@@ -517,7 +521,7 @@ async function collectDesignSearchResults(
   const results: DesignSearchResult[] = [];
 
   if (contentType === 'all' || contentType === 'hig') {
-    const higResults = await collectHigSearchResults(normalizedQuery);
+    const higResults = await collectHigSearchResults(normalizedQuery, platform);
     results.push(...higResults);
   }
 
@@ -561,9 +565,9 @@ async function collectDesignSearchResults(
   return results.slice(0, limit);
 }
 
-async function collectHigSearchResults(query: string): Promise<DesignSearchResult[]> {
+async function collectHigSearchResults(query: string, platform: string): Promise<DesignSearchResult[]> {
   try {
-    const rootJson = await httpClient.getJson<unknown>(APPLE_URLS.DESIGN_HIG_JSON);
+    const rootJson = await fetchAppleDesignJson(APPLE_URLS.DESIGN_HIG_JSON);
     const documentRecord = asRecord(rootJson);
     if (!documentRecord) {
       return [];
@@ -574,7 +578,10 @@ async function collectHigSearchResults(query: string): Promise<DesignSearchResul
     const metadata = asRecord(documentRecord.metadata);
     const rootTitle = getString(metadata, 'title') ?? 'Human Interface Guidelines';
     const rootAbstract = renderInlineCollection(getArray(documentRecord.abstract), references, APPLE_URLS.DESIGN);
-    if (`${rootTitle} ${rootAbstract}`.toLowerCase().includes(query)) {
+    if (
+      `${rootTitle} ${rootAbstract}`.toLowerCase().includes(query)
+      && designRecordMatchesPlatform(documentRecord, platform, `${rootTitle} ${rootAbstract}`)
+    ) {
       results.push({
         title: rootTitle,
         type: 'hig',
@@ -591,7 +598,10 @@ async function collectHigSearchResults(query: string): Promise<DesignSearchResul
       }
 
       const description = renderInlineCollection(getArray(reference.abstract), references, APPLE_URLS.DESIGN);
-      if (`${title} ${description}`.toLowerCase().includes(query)) {
+      if (
+        `${title} ${description}`.toLowerCase().includes(query)
+        && designRecordMatchesPlatform(reference, platform, `${title} ${description}`)
+      ) {
         results.push({
           title,
           type: 'hig',
@@ -896,16 +906,16 @@ async function collectImageCandidates(args: GetAppleDesignExamplesArgs): Promise
   if (args.url) {
     const url = args.url;
     validateAppleDesignExampleUrl(url);
-    if (isDirectImageUrl(url)) {
+    if (isDirectAppleImageCandidateUrl(url)) {
       candidates.push({ url });
     } else {
       const jsonUrl = convertToDesignJsonApiUrl(url);
       if (jsonUrl) {
-        const jsonData = await httpClient.getJson<unknown>(jsonUrl);
+        const jsonData = await fetchAppleDesignJson(jsonUrl);
         candidates.push(...extractImageCandidatesFromDesignDocument(jsonData, url));
       } else {
-        const html = await httpClient.getText(url);
-        candidates.push(...extractImageCandidatesFromHtml(html, url));
+        const { html, finalUrl } = await fetchAppleDesignHtml(url);
+        candidates.push(...extractImageCandidatesFromHtml(html, finalUrl));
       }
     }
   }
@@ -1001,7 +1011,7 @@ function collectImageCandidatesFromContent(
       }
     }
 
-    for (const nestedKey of ['content', 'items', 'rows', 'cells', 'inlineContent']) {
+    for (const nestedKey of ['content', 'items', 'rows', 'cells', 'inlineContent', 'tabs']) {
       collectImageCandidatesFromContent(getArray(record[nestedKey]), references, sourceUrl, candidates);
     }
   }
@@ -1452,8 +1462,29 @@ function renderInlineContent(
 
 function getSupportedPlatforms(documentRecord: Record<string, unknown>): string[] {
   const customMetadata = getDesignCustomMetadata(documentRecord);
-  const supportedPlatforms = customMetadata?.['supported-platforms'] ?? customMetadata?.supportedPlatforms;
+  const supportedPlatforms = customMetadata?.['supported-platforms']
+    ?? customMetadata?.supportedPlatforms
+    ?? documentRecord['supported-platforms']
+    ?? documentRecord.supportedPlatforms
+    ?? documentRecord.platforms;
   return getStringArray(supportedPlatforms);
+}
+
+function designRecordMatchesPlatform(
+  record: Record<string, unknown>,
+  platform: string,
+  fallbackText: string,
+): boolean {
+  if (platform === 'all') {
+    return true;
+  }
+
+  const supportedPlatforms = getSupportedPlatforms(record);
+  if (supportedPlatforms.length === 0) {
+    return containsText(fallbackText, platform);
+  }
+
+  return supportedPlatforms.some(supportedPlatform => containsText(supportedPlatform, platform));
 }
 
 function getCustomMetadataString(documentRecord: Record<string, unknown>, key: string): string | undefined {
@@ -1657,7 +1688,7 @@ function validateAppleDesignContentUrl(url: string): void {
 }
 
 function validateAppleDesignExampleUrl(url: string): void {
-  if (isDirectImageUrl(url)) {
+  if (isDirectImageUrl(url) || isDirectAppleImageCandidateUrl(url)) {
     validateAppleDesignImageUrl(url);
     return;
   }
@@ -1682,6 +1713,16 @@ function isAppleDesignContentUrl(url: string): boolean {
   );
 }
 
+function isAppleDesignJsonUrl(url: string): boolean {
+  const parsedUrl = safeUrl(url);
+  return Boolean(
+    parsedUrl
+    && parsedUrl.protocol === 'https:'
+    && parsedUrl.hostname === 'developer.apple.com'
+    && parsedUrl.pathname.startsWith('/tutorials/data/design/'),
+  );
+}
+
 function isDirectAppleDownloadUrl(url: string): boolean {
   const parsedUrl = safeUrl(url);
   return Boolean(parsedUrl && parsedUrl.protocol === 'https:' && APPLE_DESIGN_DOWNLOAD_HOSTS.has(parsedUrl.hostname));
@@ -1698,13 +1739,60 @@ function validateDownloadUrl(url: string): void {
   }
 }
 
+async function fetchAppleDesignHtml(url: string): Promise<{ html: string; finalUrl: string }> {
+  const { response, finalUrl } = await fetchAppleDesignManualRedirectResponse(
+    url,
+    'Apple Design content page',
+    {
+      headers: {
+        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      },
+      validateUrl: validateAppleDesignContentRedirectUrl,
+    },
+  );
+
+  return {
+    html: await response.text(),
+    finalUrl,
+  };
+}
+
+async function fetchAppleDesignJson(url: string): Promise<unknown> {
+  const { response } = await fetchAppleDesignManualRedirectResponse(
+    url,
+    'Apple Design JSON',
+    {
+      headers: {
+        Accept: 'application/json,*/*;q=0.8',
+      },
+      validateUrl: validateAppleDesignJsonRedirectUrl,
+    },
+  );
+
+  return await response.json() as unknown;
+}
+
 async function fetchAppleDesignAssetResponse(
   url: string,
   description: string,
   options: { headers: Record<string, string> },
 ): Promise<{ response: Response; finalUrl: string }> {
+  return fetchAppleDesignManualRedirectResponse(url, description, {
+    headers: options.headers,
+    validateUrl: validateAppleDesignRedirectUrl,
+  });
+}
+
+async function fetchAppleDesignManualRedirectResponse(
+  url: string,
+  description: string,
+  options: {
+    headers: Record<string, string>;
+    validateUrl: AppleDesignUrlValidator;
+  },
+): Promise<{ response: Response; finalUrl: string }> {
   let currentUrl = url;
-  validateAppleDesignRedirectUrl(currentUrl, description);
+  options.validateUrl(currentUrl, description);
 
   for (let redirectCount = 0; redirectCount <= MAX_APPLE_DESIGN_REDIRECTS; redirectCount++) {
     const response = await httpClient.get(currentUrl, {
@@ -1713,7 +1801,7 @@ async function fetchAppleDesignAssetResponse(
       allowManualRedirect: true,
       headers: options.headers,
     });
-    validateAppleDesignFinalResponseUrl(response, description);
+    validateAppleDesignFinalResponseUrl(response, description, options.validateUrl);
 
     if (!isRedirectResponse(response)) {
       return {
@@ -1727,7 +1815,7 @@ async function fetchAppleDesignAssetResponse(
     }
 
     const redirectUrl = getAppleDesignRedirectUrl(response, currentUrl, description);
-    validateAppleDesignRedirectUrl(redirectUrl, description);
+    options.validateUrl(redirectUrl, description);
     currentUrl = redirectUrl;
   }
 
@@ -1763,12 +1851,41 @@ function validateAppleDesignRedirectUrl(url: string, description: string): void 
   }
 }
 
-function validateAppleDesignFinalResponseUrl(response: Response, description: string): void {
+function validateAppleDesignContentRedirectUrl(url: string, description: string): void {
+  if (!isAppleDesignContentUrl(url)) {
+    throw new Error(`${description} redirected to a URL outside the Apple Design content allowlist.`);
+  }
+}
+
+function validateAppleDesignJsonRedirectUrl(url: string, description: string): void {
+  if (!isAppleDesignJsonUrl(url)) {
+    throw new Error(`${description} redirected to a URL outside the Apple Design JSON allowlist.`);
+  }
+}
+
+function validateAppleDesignFinalResponseUrl(
+  response: Response,
+  description: string,
+  validateUrl: AppleDesignUrlValidator,
+): void {
   if (!response.url) {
     return;
   }
 
-  validateAppleDesignRedirectUrl(response.url, description);
+  validateUrl(response.url, description);
+}
+
+function isDirectAppleImageCandidateUrl(url: string): boolean {
+  const parsedUrl = safeUrl(url);
+  if (!parsedUrl || parsedUrl.protocol !== 'https:' || !APPLE_DESIGN_DOWNLOAD_HOSTS.has(parsedUrl.hostname)) {
+    return false;
+  }
+
+  if (parsedUrl.hostname !== 'developer.apple.com') {
+    return true;
+  }
+
+  return isDirectImageUrl(url);
 }
 
 function isDirectImageUrl(url: string): boolean {
