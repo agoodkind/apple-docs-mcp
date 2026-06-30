@@ -594,6 +594,25 @@ describe('Apple Design downloads and resources', () => {
       url: 'https://developer.apple.com/design/downloads/new.zip',
     })).rejects.toThrow('cache limit');
   });
+
+  it('should enforce the aggregate cache limit across concurrent downloads', async () => {
+    process.env.APPLE_DOCS_MCP_CACHE_MAX_BYTES = '10';
+    (httpClient.get as jest.Mock)
+      .mockResolvedValueOnce(createResponse(Buffer.from('123456'), 'application/zip'))
+      .mockResolvedValueOnce(createResponse(Buffer.from('abcdef'), 'application/zip'));
+
+    const results = await Promise.allSettled([
+      handleDownloadAppleDesignResource({
+        url: 'https://developer.apple.com/design/downloads/concurrent-one.zip',
+      }),
+      handleDownloadAppleDesignResource({
+        url: 'https://developer.apple.com/design/downloads/concurrent-two.zip',
+      }),
+    ]);
+
+    expect(results.filter(result => result.status === 'fulfilled')).toHaveLength(1);
+    expect(results.filter(result => result.status === 'rejected')).toHaveLength(1);
+  });
 });
 
 describe('Apple Design examples', () => {

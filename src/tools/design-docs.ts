@@ -9,7 +9,7 @@ import type {
 } from '@modelcontextprotocol/sdk/types.js';
 import * as cheerio from 'cheerio';
 import { createHash, randomUUID } from 'node:crypto';
-import type { Dirent } from 'node:fs';
+import { mkdtempSync, type Dirent } from 'node:fs';
 import { mkdir, open, readFile, readdir, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -115,6 +115,8 @@ export interface GetAppleDesignExamplesArgs {
 const cachedResourcesByUri = new Map<string, CachedDesignResource>();
 const cachedResourcesBySourceUrl = new Map<string, CachedDesignResource>();
 const resourceCatalogById = new Map<string, DesignResourceCatalogEntry>();
+let defaultDesignCacheDirectory: string | undefined;
+let designCacheWriteQueue: Promise<void> = Promise.resolve();
 
 /**
  * Format Apple Design HIG JSON as readable Markdown.
@@ -461,6 +463,7 @@ export function clearDesignResourceCacheForTesting(): void {
   cachedResourcesByUri.clear();
   cachedResourcesBySourceUrl.clear();
   resourceCatalogById.clear();
+  designCacheWriteQueue = Promise.resolve();
 }
 
 async function fetchAppleDesignContent(url: string): Promise<string> {
@@ -794,13 +797,14 @@ async function downloadDesignResource(
   const hash = hashBuffer(data);
   const filename = sanitizeFilename(getFilenameFromUrl(finalUrl));
   const cacheDirectory = getDesignCacheDirectory();
-  await mkdir(cacheDirectory, { recursive: true, mode: 0o700 });
-  await assertDesignCacheCapacity(cacheDirectory, data.length);
-
   const {
     cacheFilename,
     filePath,
-  } = await writeExclusiveDesignCacheFile(cacheDirectory, hash, filename, data);
+  } = await withDesignCacheWriteLock(async () => {
+    await mkdir(cacheDirectory, { recursive: true, mode: 0o700 });
+    await assertDesignCacheCapacity(cacheDirectory, data.length);
+    return await writeExclusiveDesignCacheFile(cacheDirectory, hash, filename, data);
+  });
 
   const uri = `${RESOURCE_URI_PREFIX}${hash}/${cacheFilename}`;
   const newCachedResource: CachedDesignResource = {
@@ -1922,6 +1926,23 @@ async function writeExclusiveDesignCacheFile(
   throw new Error('Apple Design cache could not create a unique resource file.');
 }
 
+async function withDesignCacheWriteLock<T>(operation: () => Promise<T>): Promise<T> {
+  const previousWrite = designCacheWriteQueue;
+  let releaseLock: (() => void) | undefined;
+  designCacheWriteQueue = new Promise<void>((resolve) => {
+    releaseLock = resolve;
+  });
+
+  await previousWrite.catch(() => undefined);
+  try {
+    return await operation();
+  } finally {
+    if (releaseLock) {
+      releaseLock();
+    }
+  }
+}
+
 function createCacheFilename(hash: string, filename: string): string {
   return `${hash}-${randomUUID()}-${filename}`;
 }
@@ -1986,8 +2007,16 @@ function hasErrorCode(error: unknown, code: string): boolean {
 }
 
 function getDesignCacheDirectory(): string {
-  return process.env.APPLE_DOCS_MCP_CACHE_DIR
-    ?? path.join(tmpdir(), 'apple-docs-mcp', 'design-resources');
+  const configuredCacheDirectory = process.env.APPLE_DOCS_MCP_CACHE_DIR;
+  if (configuredCacheDirectory) {
+    return configuredCacheDirectory;
+  }
+
+  if (!defaultDesignCacheDirectory) {
+    defaultDesignCacheDirectory = mkdtempSync(path.join(tmpdir(), 'apple-docs-mcp-design-'));
+  }
+
+  return defaultDesignCacheDirectory;
 }
 
 function createTextContent(text: string): ContentBlock {
@@ -2142,4 +2171,7 @@ export async function removeCachedDesignResourcesForTesting(): Promise<void> {
     force: true,
     recursive: true,
   });
+  if (!process.env.APPLE_DOCS_MCP_CACHE_DIR) {
+    defaultDesignCacheDirectory = undefined;
+  }
 }
