@@ -2,7 +2,13 @@
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import {
+  CallToolRequestSchema,
+  ListResourcesRequestSchema,
+  ListToolsRequestSchema,
+  ReadResourceRequestSchema,
+  type CallToolResult,
+} from '@modelcontextprotocol/sdk/types.js';
 import { parseSearchResults } from './tools/search-parser.js';
 import { fetchAppleDocJson } from './tools/doc-fetcher.js';
 import { handleListTechnologies } from './tools/list-technologies.js';
@@ -16,8 +22,17 @@ import { handleFindSimilarApis } from './tools/find-similar-apis.js';
 import { handleGetDocumentationUpdates } from './tools/get-documentation-updates.js';
 import { handleGetTechnologyOverviews } from './tools/get-technology-overviews.js';
 import { handleGetSampleCode } from './tools/get-sample-code.js';
+import {
+  handleDownloadAppleDesignResource,
+  handleGetAppleDesignContent,
+  handleGetAppleDesignExamples,
+  handleListAppleDesignResources,
+  handleSearchAppleDesignDocs,
+  listCachedDesignResources,
+  readCachedDesignResource,
+} from './tools/design-docs.js';
 import { APPLE_URLS } from './utils/constants.js';
-import { isValidAppleDeveloperUrl } from './utils/url-converter.js';
+import { isAppleDesignUrl, isValidAppleDeveloperUrl } from './utils/url-converter.js';
 import { validateInput, ErrorType, createStandardErrorResponse, createToolErrorResponse } from './utils/error-handler.js';
 import { httpClient } from './utils/http-client.js';
 import { preloadPopularFrameworks } from './utils/preloader.js';
@@ -34,7 +49,7 @@ export default class AppleDeveloperDocsMCPServer {
   private async handleAsyncOperation<T>(
     operation: () => Promise<T>,
     operationName: string,
-  ): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
+  ): Promise<CallToolResult> {
     try {
       const result = await operation();
       return {
@@ -48,9 +63,9 @@ export default class AppleDeveloperDocsMCPServer {
     } catch (error) {
       // If error is already an AppError, use tool-specific suggestions
       if (error && typeof error === 'object' && 'type' in error) {
-        return createToolErrorResponse(error as any, operationName);
+        return createToolErrorResponse(error as any, operationName) as CallToolResult;
       }
-      return createStandardErrorResponse(error, operationName);
+      return createStandardErrorResponse(error, operationName) as CallToolResult;
     }
   }
 
@@ -63,11 +78,13 @@ export default class AppleDeveloperDocsMCPServer {
       {
         capabilities: {
           tools: {},
+          resources: {},
         },
       },
     );
 
     this.setupTools();
+    this.setupResources();
     this.setupErrorHandling();
   }
 
@@ -104,6 +121,16 @@ export default class AppleDeveloperDocsMCPServer {
           isError: true,
         };
       }
+    });
+  }
+
+  private setupResources() {
+    this.server.setRequestHandler(ListResourcesRequestSchema, async () => {
+      return await listCachedDesignResources();
+    });
+
+    this.server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+      return await readCachedDesignResource(request.params.uri);
     });
   }
 
@@ -155,6 +182,10 @@ export default class AppleDeveloperDocsMCPServer {
         }, 'get_apple_doc_content');
       }
 
+      if (isAppleDesignUrl(url)) {
+        return await this.getAppleDesignContent(url);
+      }
+
       // fetchAppleDocJson 已经返回正确的MCP响应格式，直接返回
       return await fetchAppleDocJson(url, {
         includeRelatedApis,
@@ -180,6 +211,66 @@ export default class AppleDeveloperDocsMCPServer {
       () => handleListTechnologies(category, language, includeBeta, limit),
       'listTechnologies',
     );
+  }
+
+  public async searchAppleDesignDocs(
+    query: string,
+    contentType: 'all' | 'hig' | 'resource' | 'page' = 'all',
+    platform: string = 'all',
+    limit: number = 20,
+  ) {
+    return await handleSearchAppleDesignDocs({
+      query,
+      contentType,
+      platform,
+      limit,
+    });
+  }
+
+  public async getAppleDesignContent(url: string) {
+    return await handleGetAppleDesignContent({ url });
+  }
+
+  public async listAppleDesignResources(
+    category?: string,
+    platform?: string,
+    format?: string,
+    searchQuery?: string,
+    limit: number = 50,
+  ) {
+    return await handleListAppleDesignResources({
+      category,
+      platform,
+      format,
+      searchQuery,
+      limit,
+    });
+  }
+
+  public async downloadAppleDesignResource(
+    resourceId?: string,
+    url?: string,
+    maxBytes?: number,
+  ) {
+    return await handleDownloadAppleDesignResource({
+      resourceId,
+      url,
+      maxBytes,
+    });
+  }
+
+  public async getAppleDesignExamples(
+    url?: string,
+    resourceId?: string,
+    query?: string,
+    limit: number = 3,
+  ) {
+    return await handleGetAppleDesignExamples({
+      url,
+      resourceId,
+      query,
+      limit,
+    });
   }
 
   public async searchFrameworkSymbols(framework: string, symbolType: string = 'all', namePattern?: string, language: string = 'swift', limit: number = API_LIMITS.DEFAULT_FRAMEWORK_SYMBOLS_LIMIT) {
