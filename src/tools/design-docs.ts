@@ -27,6 +27,7 @@ const APPLE_DESIGN_DOWNLOAD_HOSTS = new Set([
 const DEFAULT_DOWNLOAD_MAX_BYTES = 50 * 1024 * 1024;
 const DEFAULT_DOWNLOAD_CACHE_MAX_BYTES = 1024 * 1024 * 1024;
 const DEFAULT_PREVIEW_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
+const DEFAULT_INLINE_DOWNLOAD_IMAGE_MAX_BYTES = DEFAULT_PREVIEW_IMAGE_MAX_BYTES;
 const MAX_APPLE_DESIGN_REDIRECTS = 5;
 const DIRECT_RESOURCE_EXTENSIONS = new Set([
   '.dmg',
@@ -866,7 +867,10 @@ async function createDownloadedResourceContent(
     ),
   ];
 
-  if (isImageMimeType(cachedResource.mimeType)) {
+  if (
+    isImageMimeType(cachedResource.mimeType)
+    && cachedResource.size <= DEFAULT_INLINE_DOWNLOAD_IMAGE_MAX_BYTES
+  ) {
     const data = await readFile(cachedResource.filePath);
     content.push({
       type: 'image',

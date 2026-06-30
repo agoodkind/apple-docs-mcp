@@ -497,6 +497,31 @@ describe('Apple Design downloads and resources', () => {
     });
   });
 
+  it('should avoid inlining large downloaded images', async () => {
+    const imageBytes = Buffer.alloc((10 * 1024 * 1024) + 1, 1);
+    (httpClient.get as jest.Mock).mockResolvedValue(
+      createResponse(imageBytes, 'image/png'),
+    );
+
+    const result = await handleDownloadAppleDesignResource({
+      url: 'https://developer.apple.com/design/images/large-preview.png',
+      maxBytes: imageBytes.length,
+    });
+
+    expect(result.content).toEqual([
+      expect.objectContaining({
+        type: 'text',
+        text: expect.stringContaining('Downloaded Apple Design resource'),
+      }),
+      expect.objectContaining({
+        type: 'resource_link',
+        mimeType: 'image/png',
+        name: 'large-preview.png',
+      }),
+    ]);
+    expect(result.content.some(content => content.type === 'image')).toBe(false);
+  });
+
   it('should return resource links for non-image downloads with MIME fallback', async () => {
     const archiveBytes = Buffer.from('zip-bytes');
     (httpClient.get as jest.Mock).mockResolvedValue(
