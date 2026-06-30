@@ -360,6 +360,44 @@ describe('Apple Design document formatting', () => {
     expect(httpClient.get).toHaveBeenCalledTimes(1);
   });
 
+  it('should reject oversized Apple Design HTML before reading the body', async () => {
+    const arrayBuffer = jest.fn();
+    const oversizedResponse = {
+      headers: new Headers({
+        'content-length': String((20 * 1024 * 1024) + 1),
+        'content-type': 'text/html',
+      }),
+      status: 200,
+      body: null,
+      arrayBuffer,
+    } as unknown as Response;
+    (httpClient.get as jest.Mock).mockResolvedValue(oversizedResponse);
+
+    await expect(handleGetAppleDesignContent({
+      url: 'https://developer.apple.com/design/',
+    })).rejects.toThrow('Apple Design content page exceeds');
+    expect(arrayBuffer).not.toHaveBeenCalled();
+  });
+
+  it('should reject oversized Apple Design JSON before reading the body', async () => {
+    const arrayBuffer = jest.fn();
+    const oversizedResponse = {
+      headers: new Headers({
+        'content-length': String((20 * 1024 * 1024) + 1),
+        'content-type': 'application/json',
+      }),
+      status: 200,
+      body: null,
+      arrayBuffer,
+    } as unknown as Response;
+    (httpClient.get as jest.Mock).mockResolvedValue(oversizedResponse);
+
+    await expect(handleGetAppleDesignContent({
+      url: 'https://developer.apple.com/design/human-interface-guidelines/layout',
+    })).rejects.toThrow('Apple Design JSON exceeds');
+    expect(arrayBuffer).not.toHaveBeenCalled();
+  });
+
   it('should format HIG JSON content with images, tables, links, platforms, and change logs', () => {
     const result = formatAppleDesignDocument(
       SAMPLE_HIG_DOCUMENT,

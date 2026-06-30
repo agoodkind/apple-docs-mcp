@@ -28,6 +28,7 @@ const DEFAULT_DOWNLOAD_MAX_BYTES = 50 * 1024 * 1024;
 const DEFAULT_DOWNLOAD_CACHE_MAX_BYTES = 1024 * 1024 * 1024;
 const DEFAULT_PREVIEW_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
 const DEFAULT_INLINE_DOWNLOAD_IMAGE_MAX_BYTES = DEFAULT_PREVIEW_IMAGE_MAX_BYTES;
+const DEFAULT_DESIGN_CONTENT_MAX_BYTES = 20 * 1024 * 1024;
 const MAX_APPLE_DESIGN_REDIRECTS = 5;
 const DIRECT_RESOURCE_EXTENSIONS = new Set([
   '.dmg',
@@ -1779,9 +1780,14 @@ async function fetchAppleDesignHtml(url: string): Promise<{ html: string; finalU
       validateUrl: validateAppleDesignContentRedirectUrl,
     },
   );
+  const data = await readLimitedResponseBytes(
+    response,
+    DEFAULT_DESIGN_CONTENT_MAX_BYTES,
+    'Apple Design content page',
+  );
 
   return {
-    html: await response.text(),
+    html: data.toString('utf8'),
     finalUrl,
   };
 }
@@ -1797,8 +1803,13 @@ async function fetchAppleDesignJson(url: string): Promise<unknown> {
       validateUrl: validateAppleDesignJsonRedirectUrl,
     },
   );
+  const data = await readLimitedResponseBytes(
+    response,
+    DEFAULT_DESIGN_CONTENT_MAX_BYTES,
+    'Apple Design JSON',
+  );
 
-  return await response.json() as unknown;
+  return JSON.parse(data.toString('utf8')) as unknown;
 }
 
 async function fetchAppleDesignAssetResponse(
