@@ -1116,7 +1116,7 @@ function parseDesignResourceItem(
     seenLinks.add(linkKey);
 
     const format = inferFormat(downloadUrl, label);
-    const resourceId = createResourceId(category, platform, label, seenResourceIds);
+    const resourceId = createResourceId(category, platform, title, label, downloadUrl, seenResourceIds);
     entries.push({
       resourceId,
       category,
@@ -1645,14 +1645,18 @@ function isResourceCatalogLink(
 function createResourceId(
   category: string,
   platform: string | undefined,
+  title: string,
   label: string,
+  downloadUrl: string,
   seenResourceIds: Map<string, number>,
 ): string {
   const baseId = [
     'design-resource',
     slugify(category),
     slugify(platform || 'all'),
+    slugify(title),
     slugify(label),
+    hashString(downloadUrl).slice(0, 12),
   ].join(':');
   const seenCount = seenResourceIds.get(baseId) ?? 0;
   seenResourceIds.set(baseId, seenCount + 1);

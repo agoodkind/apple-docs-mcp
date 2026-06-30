@@ -257,6 +257,10 @@ function createJsonResponse(data: unknown): Response {
   return createResponse(Buffer.from(JSON.stringify(data)), 'application/json');
 }
 
+function createShortHash(value: string): string {
+  return createHash('sha256').update(value).digest('hex').slice(0, 12);
+}
+
 function createResponseWithUrl(
   data: Buffer,
   contentType: string | undefined,
@@ -429,7 +433,7 @@ describe('Apple Design Resources parser', () => {
 
     expect(resources).toHaveLength(4);
     expect(resources[0]).toMatchObject({
-      resourceId: 'design-resource:design-templates:ios-18-and-ipados-18:figma',
+      resourceId: `design-resource:design-templates:ios-18-and-ipados-18:ios-18-and-ipados-18:figma:${createShortHash('https://www.figma.com/community/file/123')}`,
       category: 'Design templates',
       platform: 'iOS 18 and iPadOS 18',
       title: 'iOS 18 and iPadOS 18',
@@ -455,6 +459,59 @@ describe('Apple Design Resources parser', () => {
       format: 'zip',
       title: 'SF Pro',
     });
+  });
+
+  it('should keep resource IDs stable when same-label resources reorder', () => {
+    const firstHtml = `
+      <main>
+        <section class="section-download">
+          <h2>Design templates</h2>
+          <h4>iOS</h4>
+          <div class="grid-item">
+            <h5>Alpha template</h5>
+            <a class="download-text-link" href="/design/downloads/alpha.zip">Download</a>
+          </div>
+          <div class="grid-item">
+            <h5>Beta template</h5>
+            <a class="download-text-link" href="/design/downloads/beta.zip">Download</a>
+          </div>
+        </section>
+      </main>
+    `;
+    const secondHtml = `
+      <main>
+        <section class="section-download">
+          <h2>Design templates</h2>
+          <h4>iOS</h4>
+          <div class="grid-item">
+            <h5>Beta template</h5>
+            <a class="download-text-link" href="/design/downloads/beta.zip">Download</a>
+          </div>
+          <div class="grid-item">
+            <h5>Alpha template</h5>
+            <a class="download-text-link" href="/design/downloads/alpha.zip">Download</a>
+          </div>
+        </section>
+      </main>
+    `;
+
+    const firstResources = parseDesignResourcesHtml(
+      firstHtml,
+      'https://developer.apple.com/design/resources/',
+    );
+    const secondResources = parseDesignResourcesHtml(
+      secondHtml,
+      'https://developer.apple.com/design/resources/',
+    );
+    const firstAlpha = firstResources.find(resource => resource.downloadUrl.endsWith('/alpha.zip'));
+    const secondAlpha = secondResources.find(resource => resource.downloadUrl.endsWith('/alpha.zip'));
+    const firstBeta = firstResources.find(resource => resource.downloadUrl.endsWith('/beta.zip'));
+    const secondBeta = secondResources.find(resource => resource.downloadUrl.endsWith('/beta.zip'));
+
+    expect(firstAlpha?.resourceId).toBe(secondAlpha?.resourceId);
+    expect(firstBeta?.resourceId).toBe(secondBeta?.resourceId);
+    expect(firstAlpha?.resourceId).not.toBe(firstBeta?.resourceId);
+    expect(firstAlpha?.resourceId).toContain(createShortHash('https://developer.apple.com/design/downloads/alpha.zip'));
   });
 });
 
