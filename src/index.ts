@@ -32,6 +32,7 @@ import {
   readCachedDesignResource,
 } from './tools/design-docs.js';
 import { APPLE_URLS } from './utils/constants.js';
+import type { AppError } from './types/error.js';
 import { isAppleDesignUrl, isValidAppleDeveloperUrl } from './utils/url-converter.js';
 import { validateInput, ErrorType, createStandardErrorResponse, createToolErrorResponse } from './utils/error-handler.js';
 import { httpClient } from './utils/http-client.js';
@@ -39,6 +40,15 @@ import { preloadPopularFrameworks } from './utils/preloader.js';
 import { warmUpCaches, schedulePeriodicCacheRefresh } from './utils/cache-warmer.js';
 import { logger } from './utils/logger.js';
 import { API_LIMITS } from './utils/constants.js';
+
+function isAppError(error: unknown): error is AppError {
+  return (
+    typeof error === 'object'
+    && error !== null
+    && 'type' in error
+    && 'message' in error
+  );
+}
 
 export default class AppleDeveloperDocsMCPServer {
   private server: Server;
@@ -64,6 +74,20 @@ export default class AppleDeveloperDocsMCPServer {
       // If error is already an AppError, use tool-specific suggestions
       if (error && typeof error === 'object' && 'type' in error) {
         return createToolErrorResponse(error as any, operationName) as CallToolResult;
+      }
+      return createStandardErrorResponse(error, operationName) as CallToolResult;
+    }
+  }
+
+  private async handleToolResultOperation(
+    operation: () => Promise<CallToolResult>,
+    operationName: string,
+  ): Promise<CallToolResult> {
+    try {
+      return await operation();
+    } catch (error) {
+      if (isAppError(error)) {
+        return createToolErrorResponse(error, operationName) as CallToolResult;
       }
       return createStandardErrorResponse(error, operationName) as CallToolResult;
     }
@@ -219,16 +243,22 @@ export default class AppleDeveloperDocsMCPServer {
     platform: string = 'all',
     limit: number = 20,
   ) {
-    return await handleSearchAppleDesignDocs({
-      query,
-      contentType,
-      platform,
-      limit,
-    });
+    return this.handleToolResultOperation(
+      () => handleSearchAppleDesignDocs({
+        query,
+        contentType,
+        platform,
+        limit,
+      }),
+      'search_apple_design_docs',
+    );
   }
 
   public async getAppleDesignContent(url: string) {
-    return await handleGetAppleDesignContent({ url });
+    return this.handleToolResultOperation(
+      () => handleGetAppleDesignContent({ url }),
+      'get_apple_design_content',
+    );
   }
 
   public async listAppleDesignResources(
@@ -238,13 +268,16 @@ export default class AppleDeveloperDocsMCPServer {
     searchQuery?: string,
     limit: number = 50,
   ) {
-    return await handleListAppleDesignResources({
-      category,
-      platform,
-      format,
-      searchQuery,
-      limit,
-    });
+    return this.handleToolResultOperation(
+      () => handleListAppleDesignResources({
+        category,
+        platform,
+        format,
+        searchQuery,
+        limit,
+      }),
+      'list_apple_design_resources',
+    );
   }
 
   public async downloadAppleDesignResource(
@@ -252,11 +285,14 @@ export default class AppleDeveloperDocsMCPServer {
     url?: string,
     maxBytes?: number,
   ) {
-    return await handleDownloadAppleDesignResource({
-      resourceId,
-      url,
-      maxBytes,
-    });
+    return this.handleToolResultOperation(
+      () => handleDownloadAppleDesignResource({
+        resourceId,
+        url,
+        maxBytes,
+      }),
+      'download_apple_design_resource',
+    );
   }
 
   public async getAppleDesignExamples(
@@ -265,12 +301,15 @@ export default class AppleDeveloperDocsMCPServer {
     query?: string,
     limit: number = 3,
   ) {
-    return await handleGetAppleDesignExamples({
-      url,
-      resourceId,
-      query,
-      limit,
-    });
+    return this.handleToolResultOperation(
+      () => handleGetAppleDesignExamples({
+        url,
+        resourceId,
+        query,
+        limit,
+      }),
+      'get_apple_design_examples',
+    );
   }
 
   public async searchFrameworkSymbols(framework: string, symbolType: string = 'all', namePattern?: string, language: string = 'swift', limit: number = API_LIMITS.DEFAULT_FRAMEWORK_SYMBOLS_LIMIT) {

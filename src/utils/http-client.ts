@@ -241,6 +241,7 @@ class HttpClient {
           && response.status >= 300
           && response.status < 400;
 
+        // Manual redirect callers rely on redirect: 'manual' preserving the 3xx status and Location header.
         // Mark User-Agent success/failure in pool
         if (pool && currentUserAgent) {
           if (response?.ok || isAllowedManualRedirect) {

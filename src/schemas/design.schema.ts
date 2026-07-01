@@ -11,7 +11,7 @@ export const searchAppleDesignDocsSchema = z.object({
 });
 
 export const getAppleDesignContentSchema = z.object({
-  url: z.string().url().describe('Apple Design URL to read'),
+  url: z.url().describe('Apple Design URL to read'),
 });
 
 export const listAppleDesignResourcesSchema = z.object({
@@ -25,13 +25,13 @@ export const listAppleDesignResourcesSchema = z.object({
 
 export const downloadAppleDesignResourceSchema = z.object({
   resourceId: z.string().optional().describe('Resource ID returned by list_apple_design_resources'),
-  url: z.string().url().optional().describe('Direct Apple-hosted resource URL to download'),
+  url: z.url().optional().describe('Direct Apple-hosted resource URL to download'),
   maxBytes: z.number().int().min(1).max(250 * 1024 * 1024).optional()
     .describe('Maximum download size in bytes'),
 });
 
 export const getAppleDesignExamplesSchema = z.object({
-  url: z.string().url().optional().describe('Apple Design, HIG, preview, or image URL'),
+  url: z.url().optional().describe('Apple Design, HIG, preview, or image URL'),
   resourceId: z.string().optional().describe('Resource ID returned by list_apple_design_resources'),
   query: z.string().optional().describe('Search query for examples and thumbnails'),
   limit: z.number().int().min(1).max(10).default(3)

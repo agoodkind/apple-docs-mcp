@@ -19,6 +19,7 @@ jest.mock('../src/utils/wwdc-data-source.js', () => ({
 }));
 
 import AppleDeveloperDocsMCPServer from '../src/index.js';
+import { handleDownloadAppleDesignResource } from '../src/tools/design-docs.js';
 
 // Mock external dependencies
 jest.mock('../src/utils/http-client.js', () => ({
@@ -325,6 +326,18 @@ describe('Response Format Validation', () => {
       
       validateResponseFormat(response);
       expect(response.isError).toBe(true);
+    });
+
+    it('should format Apple Design handler errors without nesting', async () => {
+      (handleDownloadAppleDesignResource as jest.Mock).mockRejectedValueOnce(
+        new Error('A resourceId or direct URL is required.'),
+      );
+
+      const response = await server.downloadAppleDesignResource();
+
+      validateResponseFormat(response);
+      expect(response.isError).toBe(true);
+      expect(response.content[0].text).toContain('A resourceId or direct URL is required.');
     });
   });
 

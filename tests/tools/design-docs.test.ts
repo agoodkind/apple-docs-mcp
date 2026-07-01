@@ -282,6 +282,18 @@ function createRedirectResponse(location: string): Response {
   });
 }
 
+function createCancelableRedirectResponse(location: string, cancel: () => Promise<void>): Response {
+  return {
+    status: 302,
+    headers: new Headers({
+      location,
+    }),
+    body: {
+      cancel,
+    },
+  } as unknown as Response;
+}
+
 beforeEach(async () => {
   temporaryCacheDirectory = await mkdtemp(path.join(tmpdir(), 'apple-design-test-'));
   process.env.APPLE_DOCS_MCP_CACHE_DIR = temporaryCacheDirectory;
@@ -319,8 +331,12 @@ describe('Apple Design document formatting', () => {
         <p>Download templates.</p>
       </main>
     `;
+    const cancelBody = jest.fn(async () => undefined);
     (httpClient.get as jest.Mock)
-      .mockResolvedValueOnce(createRedirectResponse('https://developer.apple.com/design/resources/'))
+      .mockResolvedValueOnce(createCancelableRedirectResponse(
+        'https://developer.apple.com/design/resources/',
+        cancelBody,
+      ))
       .mockResolvedValueOnce(createResponse(Buffer.from(html), 'text/html'));
 
     const result = await handleGetAppleDesignContent({
@@ -347,6 +363,7 @@ describe('Apple Design document formatting', () => {
         redirect: 'manual',
       }),
     );
+    expect(cancelBody).toHaveBeenCalledTimes(1);
   });
 
   it('should reject Apple Design content redirects outside the content allowlist', async () => {
@@ -362,13 +379,16 @@ describe('Apple Design document formatting', () => {
 
   it('should reject oversized Apple Design HTML before reading the body', async () => {
     const arrayBuffer = jest.fn();
+    const cancelBody = jest.fn(async () => undefined);
     const oversizedResponse = {
       headers: new Headers({
         'content-length': String((20 * 1024 * 1024) + 1),
         'content-type': 'text/html',
       }),
       status: 200,
-      body: null,
+      body: {
+        cancel: cancelBody,
+      },
       arrayBuffer,
     } as unknown as Response;
     (httpClient.get as jest.Mock).mockResolvedValue(oversizedResponse);
@@ -377,6 +397,40 @@ describe('Apple Design document formatting', () => {
       url: 'https://developer.apple.com/design/',
     })).rejects.toThrow('Apple Design content page exceeds');
     expect(arrayBuffer).not.toHaveBeenCalled();
+    expect(cancelBody).toHaveBeenCalledTimes(1);
+  });
+
+  it('should clamp invalid HIG heading levels', () => {
+    const document = {
+      metadata: {
+        title: 'Heading levels',
+      },
+      primaryContentSections: [
+        {
+          kind: 'content',
+          content: [
+            {
+              type: 'heading',
+              text: 'Negative heading',
+              level: -1,
+            },
+            {
+              type: 'heading',
+              text: 'Large heading',
+              level: 20,
+            },
+          ],
+        },
+      ],
+    };
+
+    const result = formatAppleDesignDocument(
+      document,
+      'https://developer.apple.com/design/human-interface-guidelines/layout',
+    );
+
+    expect(result).toContain('# Negative heading');
+    expect(result).toContain('###### Large heading');
   });
 
   it('should reject oversized Apple Design JSON before reading the body', async () => {
@@ -551,6 +605,38 @@ describe('Apple Design Resources parser', () => {
     expect(firstAlpha?.resourceId).not.toBe(firstBeta?.resourceId);
     expect(firstAlpha?.resourceId).toContain(createShortHash('https://developer.apple.com/design/downloads/alpha.zip'));
   });
+
+  it('should suffix resource IDs for exact duplicate resource entries', () => {
+    const html = `
+      <main>
+        <section class="section-download">
+          <h2>Design templates</h2>
+          <h4>iOS</h4>
+          <div class="grid-item">
+            <h5>Duplicate template</h5>
+            <a class="download-text-link" href="/design/downloads/duplicate.zip">Download</a>
+          </div>
+          <div class="grid-item">
+            <h5>Duplicate template</h5>
+            <a class="download-text-link" href="/design/downloads/duplicate.zip">Download</a>
+          </div>
+        </section>
+      </main>
+    `;
+
+    const resources = parseDesignResourcesHtml(
+      html,
+      'https://developer.apple.com/design/resources/',
+    );
+    const baseResourceId = `design-resource:design-templates:ios:duplicate-template:download:${
+      createShortHash('https://developer.apple.com/design/downloads/duplicate.zip')
+    }`;
+
+    expect(resources.map(resource => resource.resourceId)).toEqual([
+      baseResourceId,
+      `${baseResourceId}:2`,
+    ]);
+  });
 });
 
 describe('Apple Design downloads and resources', () => {
@@ -590,6 +676,37 @@ describe('Apple Design downloads and resources', () => {
       mimeType: 'image/png',
       blob: imageBytes.toString('base64'),
     });
+  });
+
+  it('should read persisted resource URIs after process-local cache state is cleared', async () => {
+    const imageBytes = Buffer.from('persisted-image-bytes');
+    (httpClient.get as jest.Mock).mockResolvedValue(
+      createResponse(imageBytes, 'image/png'),
+    );
+
+    const result = await handleDownloadAppleDesignResource({
+      url: 'https://developer.apple.com/design/images/persisted.png',
+    });
+    const resourceLink = result.content.find(content => content.type === 'resource_link');
+    const uri = resourceLink?.uri ?? '';
+
+    clearDesignResourceCacheForTesting();
+
+    const resource = await readCachedDesignResource(uri);
+    expect(resource.contents[0]).toMatchObject({
+      uri,
+      mimeType: 'image/png',
+      blob: imageBytes.toString('base64'),
+    });
+
+    const resources = await listCachedDesignResources();
+    expect(resources.resources).toEqual([
+      expect.objectContaining({
+        uri,
+        mimeType: 'image/png',
+        name: 'persisted.png',
+      }),
+    ]);
   });
 
   it('should avoid inlining large downloaded images', async () => {
@@ -648,8 +765,12 @@ describe('Apple Design downloads and resources', () => {
 
   it('should follow allowed Apple download redirects manually', async () => {
     const archiveBytes = Buffer.from('zip-bytes');
+    const cancelBody = jest.fn(async () => undefined);
     (httpClient.get as jest.Mock)
-      .mockResolvedValueOnce(createRedirectResponse('https://devimages-cdn.apple.com/design/templates.zip'))
+      .mockResolvedValueOnce(createCancelableRedirectResponse(
+        'https://devimages-cdn.apple.com/design/templates.zip',
+        cancelBody,
+      ))
       .mockResolvedValueOnce(createResponse(archiveBytes, 'application/zip'));
 
     const result = await handleDownloadAppleDesignResource({
@@ -683,6 +804,7 @@ describe('Apple Design downloads and resources', () => {
         redirect: 'manual',
       }),
     );
+    expect(cancelBody).toHaveBeenCalledTimes(1);
   });
 
   it('should reject download redirects outside the Apple allowlist before fetching them', async () => {
@@ -956,6 +1078,49 @@ describe('Apple Design examples', () => {
       }),
     ]);
     expect(httpClient.get).toHaveBeenCalledTimes(3);
+  });
+
+  it('should cap query-derived preview fetches by the requested limit', async () => {
+    const html = `
+      <main>
+        <section class="section-download">
+          <h2>Design templates</h2>
+          <h4>iOS</h4>
+          <div class="grid-item">
+            <img class="download-image" src="/assets/elements/icons/template-one.png">
+            <h5>Template one</h5>
+            <a class="download-text-link" href="/design/downloads/template-one.zip">Download</a>
+          </div>
+          <div class="grid-item">
+            <img class="download-image" src="/assets/elements/icons/template-two.png">
+            <h5>Template two</h5>
+            <a class="download-text-link" href="/design/downloads/template-two.zip">Download</a>
+          </div>
+        </section>
+      </main>
+    `;
+    const imageBytes = Buffer.from('template-one');
+    (httpClient.get as jest.Mock)
+      .mockResolvedValueOnce(createResponse(Buffer.from(html), 'text/html'))
+      .mockResolvedValueOnce(createResponse(imageBytes, 'image/png'));
+
+    const result = await handleGetAppleDesignExamples({
+      query: 'template',
+      limit: 1,
+    });
+
+    expect(result.content).toEqual([
+      expect.objectContaining({
+        type: 'text',
+        text: expect.stringContaining('Found 1 image example.'),
+      }),
+      expect.objectContaining({
+        type: 'image',
+        data: imageBytes.toString('base64'),
+        mimeType: 'image/png',
+      }),
+    ]);
+    expect(httpClient.get).toHaveBeenCalledTimes(2);
   });
 
   it('should skip failed discovered image candidates and keep trying later candidates', async () => {

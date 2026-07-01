@@ -469,11 +469,7 @@ export async function listCachedDesignResources(): Promise<ListResourcesResult> 
  * @returns MCP resources/read result.
  */
 export async function readCachedDesignResource(uri: string): Promise<ReadResourceResult> {
-  const cachedResource = cachedResourcesByUri.get(uri);
-  if (!cachedResource) {
-    throw new Error(`Unknown Apple Design resource URI: ${uri}`);
-  }
-
+  const cachedResource = await getCachedResourceForRead(uri);
   const data = await readFile(cachedResource.filePath);
   return {
     contents: [
@@ -484,6 +480,112 @@ export async function readCachedDesignResource(uri: string): Promise<ReadResourc
       },
     ],
   };
+}
+
+async function getCachedResourceForRead(uri: string): Promise<CachedDesignResource> {
+  const cachedResource = cachedResourcesByUri.get(uri);
+  if (cachedResource) {
+    return cachedResource;
+  }
+
+  const persistedResource = await resolvePersistedCachedResource(uri);
+  if (persistedResource) {
+    cachedResourcesByUri.set(uri, persistedResource);
+    return persistedResource;
+  }
+
+  throw new Error(`Unknown Apple Design resource URI: ${uri}`);
+}
+
+async function resolvePersistedCachedResource(uri: string): Promise<CachedDesignResource | undefined> {
+  const parsedUri = parseCachedResourceUri(uri);
+  if (!parsedUri) {
+    return undefined;
+  }
+
+  const cacheDirectory = path.resolve(getDesignCacheDirectory());
+  const filePath = path.resolve(cacheDirectory, parsedUri.cacheFilename);
+  const relativePath = path.relative(cacheDirectory, filePath);
+  if (relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
+    return undefined;
+  }
+
+  let fileStats;
+  try {
+    fileStats = await stat(filePath);
+  } catch (error) {
+    if (hasErrorCode(error, 'ENOENT')) {
+      return undefined;
+    }
+    throw error;
+  }
+
+  if (!fileStats.isFile()) {
+    return undefined;
+  }
+
+  const name = getNameFromCacheFilename(parsedUri.hash, parsedUri.cacheFilename);
+  return {
+    uri,
+    name,
+    title: name,
+    description: 'Persisted Apple Design resource',
+    mimeType: detectMimeType(undefined, parsedUri.cacheFilename),
+    filePath,
+    sourceUrl: '',
+    size: fileStats.size,
+  };
+}
+
+function parseCachedResourceUri(uri: string): { hash: string; cacheFilename: string } | undefined {
+  if (!uri.startsWith(RESOURCE_URI_PREFIX)) {
+    return undefined;
+  }
+
+  const suffix = uri.slice(RESOURCE_URI_PREFIX.length);
+  const parts = suffix.split('/');
+  if (parts.length !== 2) {
+    return undefined;
+  }
+
+  const [hash, cacheFilename] = parts;
+  if (!hash || !/^[a-f0-9]{64}$/.test(hash)) {
+    return undefined;
+  }
+
+  if (
+    !cacheFilename
+    || cacheFilename.includes('\\')
+    || cacheFilename.includes('\0')
+    || cacheFilename === '.'
+    || cacheFilename === '..'
+    || cacheFilename !== path.basename(cacheFilename)
+    || !cacheFilename.startsWith(`${hash}-`)
+  ) {
+    return undefined;
+  }
+
+  return {
+    hash,
+    cacheFilename,
+  };
+}
+
+function getNameFromCacheFilename(hash: string, cacheFilename: string): string {
+  const filenameWithUuid = cacheFilename.slice(`${hash}-`.length);
+  if (filenameWithUuid.length > 37 && filenameWithUuid[36] === '-') {
+    return filenameWithUuid.slice(37);
+  }
+
+  return cacheFilename;
+}
+
+async function cancelResponseBody(response: Response): Promise<void> {
+  if (!response.body) {
+    return;
+  }
+
+  await response.body.cancel().catch(() => undefined);
 }
 
 /**
@@ -955,12 +1057,18 @@ async function collectImageCandidates(args: GetAppleDesignExamplesArgs): Promise
       searchQuery: args.query,
       limit: args.limit,
     });
+    const queryPreviewLimit = args.limit ?? 3;
+    let queryPreviewCount = 0;
     for (const resource of resources) {
       if (resource.previewImageUrl) {
         candidates.push({
           url: resource.previewImageUrl,
           alt: resource.title,
         });
+        queryPreviewCount++;
+        if (queryPreviewCount >= queryPreviewLimit) {
+          break;
+        }
       }
     }
   }
@@ -1273,9 +1381,10 @@ function formatDesignBlock(
 
   const type = getString(record, 'type') ?? getString(record, 'kind');
   if (type === 'heading') {
-    const level = getNumber(record, 'level') ?? headingLevel;
+    const rawLevel = getNumber(record, 'level') ?? headingLevel;
+    const level = Math.min(Math.max(Math.trunc(rawLevel), 1), 6);
     const text = getString(record, 'text') ?? renderInlineCollection(getArray(record.inlineContent), references, sourceUrl);
-    return text ? `${'#'.repeat(Math.min(level, 6))} ${text}\n\n` : '';
+    return text ? `${'#'.repeat(level)} ${text}\n\n` : '';
   }
 
   if (type === 'paragraph') {
@@ -1887,11 +1996,20 @@ async function fetchAppleDesignManualRedirectResponse(
     }
 
     if (redirectCount === MAX_APPLE_DESIGN_REDIRECTS) {
+      await cancelResponseBody(response);
       throw new Error(`${description} exceeded the ${MAX_APPLE_DESIGN_REDIRECTS} redirect limit.`);
     }
 
-    const redirectUrl = getAppleDesignRedirectUrl(response, currentUrl, description);
-    options.validateUrl(redirectUrl, description);
+    let redirectUrl: string;
+    try {
+      redirectUrl = getAppleDesignRedirectUrl(response, currentUrl, description);
+      options.validateUrl(redirectUrl, description);
+    } catch (error) {
+      await cancelResponseBody(response);
+      throw error;
+    }
+
+    await cancelResponseBody(response);
     currentUrl = redirectUrl;
   }
 
@@ -2041,6 +2159,7 @@ async function readLimitedResponseBytes(
 ): Promise<Buffer> {
   const contentLength = getContentLength(response);
   if (contentLength !== undefined && contentLength > byteLimit) {
+    await cancelResponseBody(response);
     throw new Error(`${description} exceeds the ${byteLimit} byte download limit.`);
   }
 
@@ -2102,10 +2221,17 @@ async function writeExclusiveDesignCacheFile(
 
     try {
       const fileHandle = await open(filePath, 'wx', 0o600);
+      let writeError: unknown;
       try {
         await fileHandle.writeFile(data);
+      } catch (error) {
+        writeError = error;
       } finally {
         await fileHandle.close();
+      }
+      if (writeError) {
+        await rm(filePath, { force: true }).catch(() => undefined);
+        throw writeError;
       }
 
       return {
